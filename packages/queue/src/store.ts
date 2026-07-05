@@ -332,6 +332,7 @@ export type ApplyAuditAction =
   | "apply.executed"
   | "apply.failed"
   | "apply.blocked_unapproved"
+  | "creative.modified_via_apply"
   | "oauth.meta.reauth_required"
   | "meta.api_error"
   | "meta.cli_unknown_error";
@@ -387,6 +388,13 @@ export interface RecordApplyAuditInput {
   prNumber: number;
   headSha: string;
   ref?: string;
+  /**
+   * Meta 側 creative_id。指定時、実装は audit の target を既定の
+   * `apply_job:<id>` ではなく `creative:<id>` にする。`creatives.externalId`
+   * に一致する行があれば内部 id に解決し、per-creative の Audit trail
+   * パネル (creatives/[id]) からも辿れるようにする。
+   */
+  creativeExternalId?: string;
   /** Sanitized JSON metadata (token は決して載せない)。 */
   metadata?: JsonValue;
 }

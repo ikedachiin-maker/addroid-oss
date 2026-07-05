@@ -454,6 +454,7 @@ model AuditLog {
   workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
 
   @@index([createdAt])
+  @@index([target])
   @@map("audit_logs")
 }
 

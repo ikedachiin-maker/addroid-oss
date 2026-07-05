@@ -975,6 +975,55 @@ export async function runExecuteApply(
             : null,
           hierarchyId: hierarchyId ?? null,
         });
+        // creative 関連 action は creative 単位の audit_logs 行も残す
+        // (「どのクリエイティブをいつ修正したか」を apply 後に追跡する経路)。
+        // audit 書き込み失敗で apply 全体を落とさない — warn 痕跡のみ残して継続。
+        const creativeAudit = deriveCreativeAuditInput(action, finalResult.externalId);
+        if (creativeAudit) {
+          try {
+            await opts.store.recordApplyAudit({
+              workspaceId: opts.workspaceId,
+              action: "creative.modified_via_apply",
+              applyJobId: opts.applyJobId,
+              pullRequestId: context.pullRequestId,
+              prNumber: context.prNumber,
+              headSha: context.headSha,
+              ref: `pr#${context.prNumber}@${context.headSha}`,
+              creativeExternalId: creativeAudit.creativeExternalId,
+              metadata: {
+                account: plan.accountKey,
+                actionKind: action.kind,
+                changeKind: creativeAudit.changeKind,
+                creativeExternalId: creativeAudit.creativeExternalId,
+                ...(creativeAudit.adExternalId
+                  ? { adExternalId: creativeAudit.adExternalId }
+                  : {}),
+                ...(creativeAudit.displayName
+                  ? { displayName: creativeAudit.displayName }
+                  : {}),
+                nodeKey: ident.nodeKey,
+                prNumber: context.prNumber,
+                applyJobId: opts.applyJobId,
+              },
+            });
+          } catch (err) {
+            await opts.store.recordApplyExecutionLog({
+              workspaceId: opts.workspaceId,
+              kind: "apply",
+              refType: "apply_job",
+              refId: opts.applyJobId,
+              level: "warn",
+              message: `apply_job ${opts.applyJobId}: creative audit write failed for ${action.kind} (${plan.accountKey})`,
+              payload: {
+                stage: "creative_audit",
+                account: plan.accountKey,
+                actionKind: action.kind,
+                creativeExternalId: creativeAudit.creativeExternalId,
+                error: err instanceof Error ? err.message : String(err),
+              },
+            });
+          }
+        }
         continue;
       }
 
@@ -1232,6 +1281,130 @@ function actionRequiresExternalId(action: ApplyAction): boolean {
 
 function nonEmptyString(value: string | undefined): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+// ---------------------------------------------------------------------
+// creative modification audit on Apply success
+//
+// 「どのクリエイティブをいつ修正したか」を apply 後に監査ログから追跡できる
+// よう、Meta 反映に成功した creative 関連 action を creative 単位の
+// `audit_logs` 行 (action = "creative.modified_via_apply",
+// target = "creative:<id>") に翻訳する純粋関数。
+//
+// 対象:
+//   - creative.create / creative.update / creative.delete (graph + legacy)
+//   - ad.create / ad.update / ad.status で creative を参照・差し替えた場合
+//     (ad.update + graphPayload.creative.creative_id が差し替えの実経路)
+//
+// manifest ローカル ref ("creative:my_ref" 等、数値でない creativeId) は
+// 同一 manifest 内の creative.create 側で監査済みのため対象外とする。
+// ---------------------------------------------------------------------
+
+export interface CreativeAuditInput {
+  /** Meta 側 creative_id (数値文字列)。 */
+  creativeExternalId: string;
+  /** 実行された action kind (例: "creative.update", "ad.update")。 */
+  changeKind: string;
+  /** creative を参照・差し替えた ad の Meta 側 id (ad.* のみ)。 */
+  adExternalId?: string;
+  /** entity.displayName / legacy name (あれば)。 */
+  displayName?: string;
+}
+
+function isLikelyMetaId(value: unknown): value is string {
+  return typeof value === "string" && /^\d+$/.test(value);
+}
+
+function readNestedCreativeId(payload: Record<string, unknown>): string | undefined {
+  for (const key of ["graphPayload", "changes"] as const) {
+    const nested = payload[key];
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      const creative = (nested as Record<string, unknown>).creative;
+      if (creative && typeof creative === "object" && !Array.isArray(creative)) {
+        const id = (creative as Record<string, unknown>).creative_id;
+        if (isLikelyMetaId(id)) return id;
+      }
+    }
+  }
+  const creative = payload.creative;
+  if (creative && typeof creative === "object" && !Array.isArray(creative)) {
+    const id = (creative as Record<string, unknown>).creative_id;
+    if (isLikelyMetaId(id)) return id;
+  }
+  return undefined;
+}
+
+export function deriveCreativeAuditInput(
+  action: ApplyAction,
+  externalId: string | undefined
+): CreativeAuditInput | null {
+  if (action.kind === "meta_cli_operation") {
+    if (action.entity?.nodeType !== "creative" || !isLikelyMetaId(externalId)) return null;
+    return {
+      creativeExternalId: externalId,
+      changeKind: `creative.${action.verb}`,
+      ...(action.entity?.displayName ? { displayName: action.entity.displayName } : {}),
+    };
+  }
+
+  const kind = action.kind;
+  const legacy = action as LegacyApplyAction;
+  const graph = action as GraphOperationAction;
+  const payload: Record<string, unknown> =
+    "payload" in action && action.payload && typeof action.payload === "object"
+      ? (action.payload as Record<string, unknown>)
+      : {};
+  const displayName =
+    graph.entity?.displayName ??
+    (typeof legacy.name === "string" ? legacy.name : undefined) ??
+    (typeof payload.name === "string" ? (payload.name as string) : undefined);
+  const withName = (input: Omit<CreativeAuditInput, "displayName">): CreativeAuditInput =>
+    displayName ? { ...input, displayName } : input;
+
+  if (kind === "creative.create" || kind === "create_creative") {
+    if (!isLikelyMetaId(externalId)) return null;
+    return withName({ creativeExternalId: externalId, changeKind: kind });
+  }
+  if (
+    kind === "creative.update" ||
+    kind === "creative.delete" ||
+    kind === "update_creative" ||
+    kind === "delete_creative"
+  ) {
+    const creativeId = isLikelyMetaId(payload.creativeId)
+      ? (payload.creativeId as string)
+      : isLikelyMetaId(legacy.creativeId)
+        ? (legacy.creativeId as string)
+        : isLikelyMetaId(externalId)
+          ? externalId
+          : undefined;
+    if (!creativeId) return null;
+    return withName({ creativeExternalId: creativeId, changeKind: kind });
+  }
+  if (
+    kind === "ad.create" ||
+    kind === "ad.update" ||
+    kind === "ad.status" ||
+    kind === "create_ad" ||
+    kind === "update_ad"
+  ) {
+    const creativeId = isLikelyMetaId(payload.creativeId)
+      ? (payload.creativeId as string)
+      : (readNestedCreativeId(payload) ??
+        (isLikelyMetaId(legacy.creativeId) ? (legacy.creativeId as string) : undefined));
+    if (!creativeId) return null;
+    const adExternalId = isLikelyMetaId(payload.adId)
+      ? (payload.adId as string)
+      : isLikelyMetaId(externalId)
+        ? externalId
+        : undefined;
+    return withName({
+      creativeExternalId: creativeId,
+      changeKind: kind,
+      ...(adExternalId ? { adExternalId } : {}),
+    });
+  }
+  return null;
 }
 
 function deriveAppliedAdsNodeInput(args: {

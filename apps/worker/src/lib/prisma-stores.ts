@@ -624,12 +624,27 @@ export function createApplyJobStore(
     },
 
     async recordApplyAudit(input: RecordApplyAuditInput) {
+      // creativeExternalId 指定時は target を creative に切り替える。
+      // creatives.externalId に一致する行があれば内部 id に解決し、
+      // per-creative の Audit trail パネル (creatives/[id]) から辿れるようにする。
+      // GitOps 経由のみで作られた creative (creatives 行なし) は Meta 側 id を
+      // そのまま使い、グローバル操作履歴 (/cron/audit) で追跡可能にする。
+      let target = `apply_job:${input.applyJobId}`;
+      if (input.creativeExternalId) {
+        const creativeRow = await prisma.creative
+          .findFirst({
+            where: { externalId: input.creativeExternalId },
+            select: { id: true },
+          })
+          .catch(() => null);
+        target = `creative:${creativeRow?.id ?? input.creativeExternalId}`;
+      }
       await prisma.auditLog.create({
         data: {
           workspaceId: input.workspaceId,
           actor: "addroid",
           action: input.action,
-          target: `apply_job:${input.applyJobId}`,
+          target,
           ref:
             input.ref ?? `pr#${input.prNumber}@${input.headSha}`,
           metadata: (input.metadata ?? Prisma.JsonNull) as Prisma.InputJsonValue,

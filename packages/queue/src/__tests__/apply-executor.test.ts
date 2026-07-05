@@ -2207,3 +2207,143 @@ test("runExecuteApply: missing_external_id fail-closed records failingAction in 
   assert.equal(failedMeta.failingAction!.actionKind, "create_campaign");
   assert.equal(failedMeta.failingAction!.nodeKey, "fall");
 });
+
+test("runExecuteApply: ad.update creative swap emits creative.modified_via_apply audit targeting the new creative", async () => {
+  const store = new FakeApplyJobStore();
+  store.setContext(APPLY_JOB_ID, ctx());
+
+  // PR#27 型の実 manifest と同形: ad.update + graphPayload.creative.creative_id。
+  const swapAction: ApplyAction = {
+    kind: "ad.update",
+    account: "primary",
+    payload: {
+      adId: "120200000000000001",
+      name: "認知_動画30秒_v01",
+      graphPayload: { creative: { creative_id: "1344002760606892" } },
+    },
+    entity: {
+      nodeType: "ad",
+      nodeKey: "ad_awareness_v01",
+      displayName: "認知_動画30秒_v01",
+      parentNodeType: "adset",
+      parentNodeKey: "ads_main",
+      status: "paused",
+    },
+  };
+  const loader = new FakeAdsLoader({
+    source: "fixture",
+    accounts: [],
+    directActions: [{ accountKey: "primary", actions: [swapAction] }],
+  });
+  const executor = new FakeMetaActionExecutor();
+  executor.executeAction = async (input) => ({
+    status: "success",
+    message: `meta-applied ${input.action.kind}`,
+    logPayload: { kind: input.action.kind },
+    externalId: "120200000000000001",
+  });
+
+  const summary = await runExecuteApply({
+    applyJobId: APPLY_JOB_ID,
+    workspaceId: WORKSPACE_ID,
+    store,
+    loader,
+    executor,
+    sleep: async () => {},
+  });
+
+  assert.equal(summary.state, "succeeded");
+  assert.equal(summary.succeeded, 1);
+
+  const creativeAudit = store.audits.find(
+    (a) => a.action === "creative.modified_via_apply"
+  );
+  assert.ok(creativeAudit, "creative swap must emit a creative-scoped audit row");
+  assert.equal(creativeAudit.creativeExternalId, "1344002760606892");
+  assert.equal(creativeAudit.ref, "pr#42@deadbeefcafebabe");
+  const meta = creativeAudit.metadata as {
+    changeKind: string;
+    creativeExternalId: string;
+    adExternalId: string;
+    displayName: string;
+    nodeKey: string;
+    prNumber: number;
+  };
+  assert.equal(meta.changeKind, "ad.update");
+  assert.equal(meta.creativeExternalId, "1344002760606892");
+  assert.equal(meta.adExternalId, "120200000000000001");
+  assert.equal(meta.displayName, "認知_動画30秒_v01");
+  assert.equal(meta.nodeKey, "ad_awareness_v01");
+  assert.equal(meta.prNumber, 42);
+});
+
+test("runExecuteApply: creative.create/update emit creative audits; non-creative actions do not", async () => {
+  const store = new FakeApplyJobStore();
+  store.setContext(APPLY_JOB_ID, ctx());
+
+  const actions: ApplyAction[] = [
+    {
+      kind: "creative.create",
+      account: "primary",
+      payload: { creativeId: "cr_new", pageId: "1209126502279058" },
+      entity: { nodeType: "creative", nodeKey: "cr_new", displayName: "New Creative" },
+    },
+    {
+      kind: "creative.update",
+      account: "primary",
+      payload: { creativeId: "2237964250354021", name: "Renamed" },
+      entity: { nodeType: "creative", nodeKey: "cr_v02" },
+    },
+    {
+      kind: "campaign.update",
+      account: "primary",
+      payload: { campaignId: "120200000000000009", name: "Campaign Renamed" },
+      entity: { nodeType: "campaign", nodeKey: "cmp_main", status: "paused" },
+    },
+  ];
+  const loader = new FakeAdsLoader({
+    source: "fixture",
+    accounts: [],
+    directActions: [{ accountKey: "primary", actions }],
+  });
+  const executor = new FakeMetaActionExecutor();
+  executor.executeAction = async (input) => ({
+    status: "success",
+    message: `meta-applied ${input.action.kind}`,
+    logPayload: { kind: input.action.kind },
+    // creative.create は Meta 側で採番された数値 id を返す想定。
+    externalId:
+      input.action.kind === "creative.create" ? "9990001112223334" : "120200000000000009",
+  });
+
+  const summary = await runExecuteApply({
+    applyJobId: APPLY_JOB_ID,
+    workspaceId: WORKSPACE_ID,
+    store,
+    loader,
+    executor,
+    sleep: async () => {},
+  });
+
+  assert.equal(summary.state, "succeeded");
+  assert.equal(summary.succeeded, 3);
+
+  const creativeAudits = store.audits.filter(
+    (a) => a.action === "creative.modified_via_apply"
+  );
+  assert.equal(
+    creativeAudits.length,
+    2,
+    "creative.create と creative.update のみが creative audit を出す (campaign.update は対象外)"
+  );
+  const created = creativeAudits.find(
+    (a) => (a.metadata as { changeKind: string }).changeKind === "creative.create"
+  );
+  assert.ok(created);
+  assert.equal(created.creativeExternalId, "9990001112223334");
+  const updated = creativeAudits.find(
+    (a) => (a.metadata as { changeKind: string }).changeKind === "creative.update"
+  );
+  assert.ok(updated);
+  assert.equal(updated.creativeExternalId, "2237964250354021");
+});
