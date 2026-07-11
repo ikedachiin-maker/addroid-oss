@@ -53,6 +53,10 @@ import {
 } from "@addroid/llm-provider";
 import { getGithubAdapter, injectGithubAdapter } from "@addroid/github-adapter";
 import {
+  awarenessPlaybookToKnowledgeBriefs,
+  loadAwarenessPlaybook,
+} from "@addroid/ops-schemas";
+import {
   createApplyJobStore,
   createCronOpsStore,
   createGithubPollStore,
@@ -757,10 +761,19 @@ export async function startWorker(opts: StartWorkerOptions = {}): Promise<Worker
             const wsMode = await loadWorkspaceMode(prisma, workspace.id);
             const summaries: ImprovementPrSummary[] = [];
             const errors: string[] = [];
+            // 認知広告運用プレイブック (ops repo workflows/awareness-playbook.yaml)
+            // を毎回ロードし、8 agent パイプラインに knowledgeBriefs として注入する。
+            // 未配備 / パース不能なら空 (= 従来挙動) に縮退する。
+            const awarenessKnowledgeBriefs = awarenessPlaybookToKnowledgeBriefs(
+              opsRepoRootDir ? loadAwarenessPlaybook(opsRepoRootDir) : null
+            );
             const pipelineRunner = createImprovementPrPipelineRunner({
               provider: llmSelection.provider,
               workspaceId: workspace.id,
               cronRunId: handle.cronRunId,
+              ...(awarenessKnowledgeBriefs.length > 0
+                ? { knowledgeBriefs: awarenessKnowledgeBriefs }
+                : {}),
             });
             const publisher = createImprovementPrGithubPublisher({
               prisma,

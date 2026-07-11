@@ -299,6 +299,209 @@ guards:
   }
 });
 
+// ---- runPlanForRoot: awareness optimization goal guard --------------
+
+test("runPlanForRoot warns on forbidden optimization goal (REACH) with default guards", () => {
+  const { dir, cleanup } = writeFixture({
+    ".addroid/project.yaml": VALID_PROJECT,
+    "workflows/cron.yaml": VALID_CRON,
+    "operations/primary/awareness-adset-reach.json": operationManifest("primary", [
+      {
+        kind: "adset.create",
+        payload: {
+          adsetId: "as_aw_1",
+          campaignId: "cmp_awareness",
+          name: "Awareness Adset",
+          status: "PAUSED",
+          optimizationGoal: "REACH",
+        },
+      },
+    ]),
+  });
+  try {
+    const out = runPlanForRoot({ rootDir: dir });
+    assert.equal(out.ok, true);
+    assert.equal(out.risk, "warn");
+    assert.match(
+      out.validationWarnings.map((w) => w.message).join("\n"),
+      /認知広告ガード.*REACH/
+    );
+    assert.match(
+      out.validationWarnings.map((w) => w.message).join("\n"),
+      /AD_RECALL_LIFT \/ THRUPLAY/
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("runPlanForRoot warns when adset under awareness campaign uses non-allowed goal", () => {
+  const { dir, cleanup } = writeFixture({
+    ".addroid/project.yaml": VALID_PROJECT,
+    "workflows/cron.yaml": VALID_CRON,
+    "operations/primary/awareness-pair.json": operationManifest("primary", [
+      {
+        kind: "campaign.create",
+        payload: {
+          campaignId: "cmp_awareness",
+          name: "Awareness Campaign",
+          objective: "OUTCOME_AWARENESS",
+          status: "PAUSED",
+        },
+      },
+      {
+        kind: "adset.create",
+        payload: {
+          adsetId: "as_aw_2",
+          campaignId: "cmp_awareness",
+          name: "Awareness Adset",
+          status: "PAUSED",
+          optimizationGoal: "LINK_CLICKS",
+        },
+      },
+    ]),
+  });
+  try {
+    const out = runPlanForRoot({ rootDir: dir });
+    assert.equal(out.risk, "warn");
+    assert.match(
+      out.validationWarnings.map((w) => w.message).join("\n"),
+      /認知\(OUTCOME_AWARENESS\)キャンペーン配下.*LINK_CLICKS.*許可リスト/
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("runPlanForRoot accepts allowed awareness goals (AD_RECALL_LIFT / THRUPLAY graphPayload)", () => {
+  const { dir, cleanup } = writeFixture({
+    ".addroid/project.yaml": VALID_PROJECT,
+    "workflows/cron.yaml": VALID_CRON,
+    "operations/primary/awareness-ok.json": operationManifest("primary", [
+      {
+        kind: "campaign.create",
+        payload: {
+          campaignId: "cmp_awareness",
+          name: "Awareness Campaign",
+          objective: "OUTCOME_AWARENESS",
+          status: "PAUSED",
+        },
+      },
+      {
+        kind: "adset.create",
+        payload: {
+          adsetId: "as_aw_3",
+          campaignId: "cmp_awareness",
+          name: "Recall Adset",
+          status: "PAUSED",
+          optimizationGoal: "AD_RECALL_LIFT",
+        },
+      },
+      {
+        kind: "adset.update",
+        payload: {
+          adsetId: "as_aw_4",
+          graphPayload: { optimization_goal: "THRUPLAY" },
+        },
+      },
+    ]),
+  });
+  try {
+    const out = runPlanForRoot({ rootDir: dir });
+    assert.equal(out.ok, true);
+    assert.equal(out.risk, "ok");
+    assert.equal(out.validationWarnings.length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("runPlanForRoot blocks forbidden goal when awareness guard mode is block", () => {
+  const { dir, cleanup } = writeFixture({
+    ".addroid/project.yaml": VALID_PROJECT,
+    "workflows/cron.yaml": VALID_CRON,
+    "workflows/guards.yaml": `version: 1
+guards:
+  budgetIncrease:
+    warnOverRatio: 2
+    blockOverRatio: 5
+  awarenessOptimizationGoal:
+    mode: block
+`,
+    "operations/primary/awareness-adset-imp.json": operationManifest("primary", [
+      {
+        kind: "adset.update",
+        payload: {
+          adsetId: "as_aw_5",
+          graphPayload: { optimization_goal: "IMPRESSIONS" },
+        },
+      },
+    ]),
+  });
+  try {
+    const out = runPlanForRoot({ rootDir: dir });
+    assert.equal(out.ok, false);
+    assert.equal(out.risk, "error");
+    assert.match(
+      out.validationErrors.map((e) => e.message).join("\n"),
+      /認知広告ガード.*IMPRESSIONS/
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("runPlanForRoot skips awareness guard for exemptFiles and mode off", () => {
+  const manifest = operationManifest("primary", [
+    {
+      kind: "adset.create",
+      payload: {
+        adsetId: "as_aw_6",
+        campaignId: "cmp_awareness",
+        name: "Legacy Adset",
+        status: "PAUSED",
+        optimizationGoal: "REACH",
+      },
+    },
+  ]);
+  const exempt = writeFixture({
+    ".addroid/project.yaml": VALID_PROJECT,
+    "workflows/cron.yaml": VALID_CRON,
+    "workflows/guards.yaml": `version: 1
+guards:
+  awarenessOptimizationGoal:
+    mode: warn
+    exemptFiles:
+      - "operations/primary/legacy.json"
+`,
+    "operations/primary/legacy.json": manifest,
+  });
+  try {
+    const out = runPlanForRoot({ rootDir: exempt.dir });
+    assert.equal(out.risk, "ok");
+    assert.equal(out.validationWarnings.length, 0);
+  } finally {
+    exempt.cleanup();
+  }
+  const off = writeFixture({
+    ".addroid/project.yaml": VALID_PROJECT,
+    "workflows/cron.yaml": VALID_CRON,
+    "workflows/guards.yaml": `version: 1
+guards:
+  awarenessOptimizationGoal:
+    mode: "off"
+`,
+    "operations/primary/legacy.json": manifest,
+  });
+  try {
+    const out = runPlanForRoot({ rootDir: off.dir });
+    assert.equal(out.risk, "ok");
+    assert.equal(out.validationWarnings.length, 0);
+  } finally {
+    off.cleanup();
+  }
+});
+
 // ---- runPlanForRoot: guardrail violation (plan-level error) --------
 
 test("runPlanForRoot surfaces invalid operation manifest as validation errors", () => {

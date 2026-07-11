@@ -119,6 +119,44 @@ test("buildStrategyAgentPrompt embeds the strategy system prompt + user JSON", (
   assert.deepEqual(JSON.parse(messageContentText(prompt[1]!.content)), input);
 });
 
+test("agent system prompts instruct how to treat knowledgeBriefs", () => {
+  for (const prompt of [
+    STRATEGY_AGENT_SYSTEM_PROMPT,
+    COPY_AGENT_SYSTEM_PROMPT,
+    IMAGE_PROMPT_AGENT_SYSTEM_PROMPT,
+    ANALYST_AGENT_SYSTEM_PROMPT,
+    MEDIA_BUYER_AGENT_SYSTEM_PROMPT,
+  ]) {
+    assert.match(prompt, /knowledgeBriefs/);
+    assert.match(prompt, /operating policy/);
+  }
+});
+
+test("buildStrategyAgentPrompt / buildMediaBuyerAgentPrompt embed knowledgeBriefs in user JSON", () => {
+  const brief =
+    "認知キャンペーンの最適化目標は AD_RECALL_LIFT / THRUPLAY のみ使用し、REACH は使用禁止。";
+  const strategyMessages = buildStrategyAgentPrompt({
+    accountId: "act_1",
+    objective: "awareness",
+    audienceSummary: "JP broad",
+    currency: "JPY",
+    knowledgeBriefs: [brief],
+  });
+  const strategyUser = JSON.parse(strategyMessages[1]!.content as string);
+  assert.deepEqual(strategyUser.knowledgeBriefs, [brief]);
+
+  const buyerMessages = buildMediaBuyerAgentPrompt({
+    accountId: "act_1",
+    currency: "JPY",
+    snapshotIds: [],
+    currentDailyBudget: 5000,
+    riskTolerance: "balanced",
+    knowledgeBriefs: [brief],
+  });
+  const buyerUser = JSON.parse(buyerMessages[1]!.content as string);
+  assert.deepEqual(buyerUser.knowledgeBriefs, [brief]);
+});
+
 test("runStrategyAgent: succeeds, builds ai_run with provider/model/usage/cost", async () => {
   const provider = await connectedMockProvider({
     responder: () =>

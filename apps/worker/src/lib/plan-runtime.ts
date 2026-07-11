@@ -21,6 +21,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { isSupportedMetaCliOperation } from "@addroid/meta-adapter";
 import {
+  DEFAULT_AWARENESS_OPTIMIZATION_GOAL_GUARD,
   loadSubmissionGuardsPolicy,
   type SubmissionGuardsYaml,
 } from "@addroid/ops-schemas";
@@ -98,6 +99,7 @@ const DEFAULT_SUBMISSION_GUARDS_POLICY: SubmissionGuardsYaml = {
       warnOverRatio: 2,
       blockOverRatio: 5,
     },
+    awarenessOptimizationGoal: DEFAULT_AWARENESS_OPTIMIZATION_GOAL_GUARD,
   },
 };
 
@@ -230,6 +232,114 @@ function evaluateSubmissionGuards(input: {
         warnings.push({ file: input.file, pointer, message });
         findings.push({ level: "warning", pointer, message });
       }
+    }
+  }
+  const awareness = evaluateAwarenessOptimizationGoalGuard(input);
+  errors.push(...awareness.errors);
+  warnings.push(...awareness.warnings);
+  findings.push(...awareness.findings);
+  return { errors, warnings, findings };
+}
+
+/**
+ * 認知広告ガード (運用プレイブック由来)。
+ *
+ * - adset.create / adset.update の optimization_goal が forbiddenGoals
+ *   (既定: REACH / IMPRESSIONS = リーチ/インプレッション最大化) なら指摘する。
+ *   Meta の認知度キャンペーンはデフォルトでリーチ最大化が選択されるため、
+ *   気づかず提出される事故が実際に起きた (mnp-fudosan-awareness-adset.json)。
+ * - 同一 manifest 内に objective が *AWARENESS* の campaign があり、その配下の
+ *   adset の optimization_goal が allowedGoals (既定: AD_RECALL_LIFT / THRUPLAY)
+ *   に無い場合も指摘する。
+ * - mode: "warn" (既定) は警告のみで apply 可能、"block" は plan error、
+ *   "off" で無効化。exemptFiles で歴史的 manifest を除外できる。
+ */
+function evaluateAwarenessOptimizationGoalGuard(input: {
+  file: string;
+  accountKey: string;
+  actions: OperationPlanAction[];
+  policy: SubmissionGuardsYaml;
+}): {
+  errors: ValidationFinding[];
+  warnings: ValidationFinding[];
+  findings: PlanFinding[];
+} {
+  const errors: ValidationFinding[] = [];
+  const warnings: ValidationFinding[] = [];
+  const findings: PlanFinding[] = [];
+  const policy =
+    input.policy.guards.awarenessOptimizationGoal ??
+    DEFAULT_AWARENESS_OPTIMIZATION_GOAL_GUARD;
+  if (policy.mode === "off") return { errors, warnings, findings };
+  if (policy.exemptFiles.includes(input.file)) return { errors, warnings, findings };
+
+  const allowed = new Set(policy.allowedGoals.map((g) => g.toUpperCase()));
+  const forbidden = new Set(policy.forbiddenGoals.map((g) => g.toUpperCase()));
+
+  // 同一 manifest 内で宣言された認知キャンペーンの識別子 (campaignId / ref)。
+  const awarenessCampaignKeys = new Set<string>();
+  for (const action of input.actions) {
+    if (action.kind !== "graph_operation" || !action.payload) continue;
+    if (action.resource !== "campaign") continue;
+    const payload = action.payload;
+    const graphPayload = isRecord(payload.graphPayload) ? payload.graphPayload : {};
+    const objective = (
+      readString(payload.objective) ?? readString(graphPayload.objective)
+    )?.toUpperCase();
+    if (!objective || !objective.includes("AWARENESS")) continue;
+    for (const key of [
+      readString(payload.campaignId),
+      action.ref ?? null,
+      action.ref?.replace(/^campaign:/, "") ?? null,
+    ]) {
+      if (key) awarenessCampaignKeys.add(key);
+    }
+  }
+
+  const report = (pointer: string, message: string) => {
+    if (policy.mode === "block") {
+      errors.push({ file: input.file, pointer, message });
+      findings.push({ level: "error", pointer, message });
+    } else {
+      warnings.push({ file: input.file, pointer, message });
+      findings.push({ level: "warning", pointer, message });
+    }
+  };
+
+  for (let i = 0; i < input.actions.length; i += 1) {
+    const action = input.actions[i]!;
+    if (action.kind !== "graph_operation" || !action.payload) continue;
+    if (action.resource !== "adset") continue;
+    if (action.verb !== "create" && action.verb !== "update") continue;
+    const payload = action.payload;
+    const graphPayload = isRecord(payload.graphPayload) ? payload.graphPayload : {};
+    const goal = (
+      readString(payload.optimizationGoal) ?? readString(graphPayload.optimization_goal)
+    )?.toUpperCase();
+    if (!goal) continue;
+    const pointer = `/actions/${i}`;
+    if (forbidden.has(goal)) {
+      report(
+        pointer,
+        `認知広告ガード: optimization_goal=${goal} は運用プレイブックで使用禁止です` +
+          `(リーチ/インプレッション最大化は認知配信で使わない)。` +
+          `${policy.allowedGoals.join(" / ")} を使ってください。`
+      );
+      continue;
+    }
+    const campaignRef =
+      readString(payload.campaignId) ??
+      readString(graphPayload.campaign_id) ??
+      null;
+    const underAwareness =
+      (campaignRef !== null && awarenessCampaignKeys.has(campaignRef)) ||
+      (campaignRef !== null && awarenessCampaignKeys.has(`campaign:${campaignRef}`));
+    if (underAwareness && !allowed.has(goal)) {
+      report(
+        pointer,
+        `認知広告ガード: 認知(OUTCOME_AWARENESS)キャンペーン配下の adset の ` +
+          `optimization_goal=${goal} は許可リスト (${policy.allowedGoals.join(" / ")}) 外です。`
+      );
     }
   }
   return { errors, warnings, findings };

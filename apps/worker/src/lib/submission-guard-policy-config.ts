@@ -8,6 +8,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { Prisma, type PrismaClient } from "@addroid/db";
 import {
+  DEFAULT_AWARENESS_OPTIMIZATION_GOAL_GUARD,
   loadSubmissionGuardsPolicy,
   type SubmissionGuardsYaml,
 } from "@addroid/ops-schemas";
@@ -41,6 +42,7 @@ export const DEFAULT_SUBMISSION_GUARDS_POLICY: SubmissionGuardsYaml = {
       warnOverRatio: 2,
       blockOverRatio: 5,
     },
+    awarenessOptimizationGoal: DEFAULT_AWARENESS_OPTIMIZATION_GOAL_GUARD,
   },
 };
 
@@ -78,6 +80,9 @@ export async function saveSubmissionGuardPolicyConfig(opts: {
     throw new Error("ops repo のローカル checkout が見つかりません。GitHub 連携を確認してください。");
   }
 
+  // guards.yaml を全文再生成するため、UI が管理しない awarenessOptimizationGoal
+  // 節は既存ファイルの値を引き継ぐ (無ければ既定値)。
+  const existing = loadSubmissionGuardsPolicy(rootDir);
   const policy: SubmissionGuardsYaml = {
     version: 1,
     guards: {
@@ -85,6 +90,9 @@ export async function saveSubmissionGuardPolicyConfig(opts: {
         warnOverRatio,
         blockOverRatio,
       },
+      awarenessOptimizationGoal:
+        existing?.guards.awarenessOptimizationGoal ??
+        DEFAULT_AWARENESS_OPTIMIZATION_GOAL_GUARD,
     },
   };
   const yamlPath = path.join(rootDir, SUBMISSION_GUARDS_YAML);
@@ -141,14 +149,30 @@ function readPositiveNumber(value: unknown, field: string): number {
 
 function renderSubmissionGuardsYaml(policy: SubmissionGuardsYaml): string {
   const budget = policy.guards.budgetIncrease;
-  return [
+  const awareness =
+    policy.guards.awarenessOptimizationGoal ?? DEFAULT_AWARENESS_OPTIMIZATION_GOAL_GUARD;
+  const lines = [
     "version: 1",
     "guards:",
     "  budgetIncrease:",
     `    warnOverRatio: ${formatNumber(budget.warnOverRatio)}`,
     `    blockOverRatio: ${formatNumber(budget.blockOverRatio)}`,
-    "",
-  ].join("\n");
+    "  # 認知広告ガード: 認知配信の optimization_goal を運用プレイブックに沿って検査",
+    "  awarenessOptimizationGoal:",
+    `    mode: ${awareness.mode}`,
+    `    allowedGoals: [${awareness.allowedGoals.join(", ")}]`,
+    `    forbiddenGoals: [${awareness.forbiddenGoals.join(", ")}]`,
+  ];
+  if (awareness.exemptFiles.length > 0) {
+    lines.push("    exemptFiles:");
+    for (const file of awareness.exemptFiles) {
+      lines.push(`      - "${file}"`);
+    }
+  } else {
+    lines.push("    exemptFiles: []");
+  }
+  lines.push("");
+  return lines.join("\n");
 }
 
 function formatNumber(value: number): string {

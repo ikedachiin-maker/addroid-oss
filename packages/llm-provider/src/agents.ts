@@ -272,6 +272,11 @@ export interface StrategyAgentInput {
   recentKpis?: Record<string, number>;
   /** 既知の制約 ("budget freeze until 2026-05-10" 等)。 */
   constraints?: string[];
+  /**
+   * オペレーター運用プレイブック由来のノウハウ (ops repo workflows/awareness-playbook.yaml
+   * 等から注入)。日本語可。agent はアカウント運用ポリシーとして従う。
+   */
+  knowledgeBriefs?: string[];
 }
 
 export interface StrategyAgentOutput {
@@ -288,6 +293,7 @@ export const STRATEGY_AGENT_SYSTEM_PROMPT = [
   "You are the AdDroid OSS strategy agent.",
   "Given an ad account context, propose a high-level Meta Ads strategy direction.",
   "AdDroid never applies your output directly — it lands as a GitHub PR for human review.",
+  "If the input includes knowledgeBriefs (operator-curated methodology notes, possibly in Japanese), treat them as this account's operating policy: follow them when choosing KPIs, optimization goals, budgets, and creative direction, and mention the brief that drove a decision in your rationale.",
   "",
   "Respond with a single JSON object using exactly these fields:",
   "  recommendedApproach: string (1-2 sentences, plain prose)",
@@ -359,6 +365,11 @@ export interface CopyAgentInput {
   mustIncludeKeywords?: string[];
   /** 禁止単語 (compliance や brand 制約由来)。 */
   forbiddenKeywords?: string[];
+  /**
+   * オペレーター運用プレイブック由来のノウハウ (ops repo workflows/awareness-playbook.yaml
+   * 等から注入)。日本語可。agent はアカウント運用ポリシーとして従う。
+   */
+  knowledgeBriefs?: string[];
 }
 
 export interface CopyAgentVariant {
@@ -381,6 +392,7 @@ export const COPY_AGENT_SYSTEM_PROMPT = [
   "You are the AdDroid OSS copy agent.",
   "Generate Meta Ads copy variants for the given audience and offer.",
   "Your output is reviewed by the creative_qa agent and lands in a GitHub PR — never applied to Meta directly.",
+  "If the input includes knowledgeBriefs (operator-curated methodology notes, possibly in Japanese), treat them as this account's operating policy: follow them when choosing KPIs, optimization goals, budgets, and creative direction, and mention the brief that drove a decision in your rationale.",
   "",
   "Respond with a single JSON object using exactly these fields:",
   "  primary:    { headline: string, primaryText: string, description: string, cta: string }",
@@ -608,6 +620,12 @@ export interface ImagePromptAgentInput {
     height: number;
     format?: "png" | "jpeg";
   }>;
+
+  /**
+   * オペレーター運用プレイブック由来のノウハウ (ops repo workflows/awareness-playbook.yaml
+   * 等から注入)。日本語可。agent はアカウント運用ポリシーとして従う。
+   */
+  knowledgeBriefs?: string[];
 }
 
 /**
@@ -662,6 +680,7 @@ export const IMAGE_PROMPT_AGENT_SYSTEM_PROMPT = [
   "You are the AdDroid OSS image_prompt agent.",
   "Produce text-to-image prompts and variation conditions that match the audience, brand profile, recent performance, and improvement strategy.",
   "Image generation itself is delegated to a separate provider — your job is the prompt and the variation conditions.",
+  "If the input includes knowledgeBriefs (operator-curated methodology notes, possibly in Japanese), treat them as this account's operating policy: follow them when choosing KPIs, optimization goals, budgets, and creative direction, and mention the brief that drove a decision in your rationale.",
   "",
   "The user message is a JSON object with these (optional except where noted) fields:",
   "  accountId             string (required)",
@@ -1068,6 +1087,11 @@ export interface AnalystAgentInput {
   prior?: AnalystAgentMetrics;
   /** 紐付く performance_snapshots の id 配列 (account/campaign/adset/ad)。 */
   snapshotIds: string[];
+  /**
+   * オペレーター運用プレイブック由来のノウハウ (ops repo workflows/awareness-playbook.yaml
+   * 等から注入)。日本語可。agent はアカウント運用ポリシーとして従う。
+   */
+  knowledgeBriefs?: string[];
 }
 
 export interface AnalystAgentImprovementCandidate {
@@ -1093,6 +1117,7 @@ export const ANALYST_AGENT_SYSTEM_PROMPT = [
   "You are the AdDroid OSS analyst agent.",
   "Summarize a Meta Ads daily_report period and surface top improvement candidates.",
   "You do not propose budget or targeting changes — that is the media_buyer agent's role.",
+  "If the input includes knowledgeBriefs (operator-curated methodology notes, possibly in Japanese), treat them as this account's operating policy: follow them when choosing KPIs, optimization goals, budgets, and creative direction, and mention the brief that drove a decision in your rationale.",
   "",
   "Respond with a single JSON object using exactly these fields:",
   "  commentary:       string (1 short paragraph, plain prose)",
@@ -1234,6 +1259,11 @@ export interface MediaBuyerAgentInput {
   riskTolerance: "conservative" | "balanced" | "aggressive";
   /** 直近 KPI の要約 (analyst agent からの引き継ぎ)。 */
   analystSummary?: string;
+  /**
+   * オペレーター運用プレイブック由来のノウハウ (ops repo workflows/awareness-playbook.yaml
+   * 等から注入)。日本語可。agent はアカウント運用ポリシーとして従う。
+   */
+  knowledgeBriefs?: string[];
 }
 
 export interface MediaBuyerAgentOutput {
@@ -1259,6 +1289,7 @@ export const MEDIA_BUYER_AGENT_SYSTEM_PROMPT = [
   "Propose budget / bid / targeting changes for Meta Ads. AdDroid never applies your output directly.",
   "Every proposal lands as a GitHub PR — human merge is the approval boundary.",
   "Dangerous categories (budget_increase, new_campaign, targeting_change, monthly_budget_change, automation_rule_change) ALWAYS require human approval, regardless of execution mode.",
+  "If the input includes knowledgeBriefs (operator-curated methodology notes, possibly in Japanese), treat them as this account's operating policy: follow them when choosing KPIs, optimization goals, budgets, and creative direction, and mention the brief that drove a decision in your rationale.",
   "",
   "Respond with a single JSON object using exactly these fields:",
   "  proposals:    { hierarchy: 'account'|'campaign'|'adset'|'ad', target: string, category: string, proposedChange: string, rationale: string }[]",

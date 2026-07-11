@@ -171,6 +171,30 @@ export const SubmissionGuardBudgetIncreaseSchema = z
     path: ["warnOverRatio"],
   });
 
+export const SubmissionGuardAwarenessOptimizationGoalSchema = z
+  .object({
+    mode: z.enum(["off", "warn", "block"]).default("warn"),
+    /** 認知(OUTCOME_AWARENESS)キャンペーン配下の adset で許可する optimization_goal。 */
+    allowedGoals: z.array(z.string().min(1)).default(["AD_RECALL_LIFT", "THRUPLAY"]),
+    /** キャンペーン objective に関わらず提出時に指摘する optimization_goal。 */
+    forbiddenGoals: z.array(z.string().min(1)).default(["REACH", "IMPRESSIONS"]),
+    /**
+     * 検査を免除する operation manifest の相対パス。ガード導入以前に apply 済みの
+     * 歴史的ファイル (後続 manifest で修正済み) が毎回警告を出し続けるのを防ぐ。
+     */
+    exemptFiles: z.array(z.string().min(1)).default([]),
+  })
+  .strict();
+
+export const DEFAULT_AWARENESS_OPTIMIZATION_GOAL_GUARD: z.infer<
+  typeof SubmissionGuardAwarenessOptimizationGoalSchema
+> = {
+  mode: "warn",
+  allowedGoals: ["AD_RECALL_LIFT", "THRUPLAY"],
+  forbiddenGoals: ["REACH", "IMPRESSIONS"],
+  exemptFiles: [],
+};
+
 export const SubmissionGuardsYamlSchema = z
   .object({
     version: z.literal(1),
@@ -180,9 +204,15 @@ export const SubmissionGuardsYamlSchema = z
           warnOverRatio: 2,
           blockOverRatio: 5,
         }),
+        awarenessOptimizationGoal: SubmissionGuardAwarenessOptimizationGoalSchema.default(
+          DEFAULT_AWARENESS_OPTIMIZATION_GOAL_GUARD
+        ),
       })
       .strict()
-      .default({ budgetIncrease: { warnOverRatio: 2, blockOverRatio: 5 } }),
+      .default({
+        budgetIncrease: { warnOverRatio: 2, blockOverRatio: 5 },
+        awarenessOptimizationGoal: DEFAULT_AWARENESS_OPTIMIZATION_GOAL_GUARD,
+      }),
   })
   .strict();
 
@@ -328,12 +358,101 @@ export const AutomationRulesYamlSchema = z
 export type AutomationRuleYaml = z.infer<typeof AutomationRuleYamlSchema>;
 export type AutomationRulesYaml = z.infer<typeof AutomationRulesYamlSchema>;
 
+// ---------------------------------------------------------------------
+// Awareness playbook — 認知広告運用プレイブック (workflows/awareness-playbook.yaml)
+//
+// オペレーターの認知広告メソッド (最適化目標の選び方 / 完全視聴率2%の合格ライン /
+// 小予算テスト / 動画視聴者→類似オーディエンス) を数値閾値 + prompt 注入用
+// ブリーフとして ops repo で管理する。正本の解説は ops repo の
+// knowledge/awareness-ads-playbook.md。
+// ---------------------------------------------------------------------
+
+export const AwarenessPlaybookKpiSchema = z
+  .object({
+    /** 動画100%完全視聴率 (video_p100 ÷ 動画再生数) の合格ライン。既定 2%。 */
+    videoCompletionRateMin: z.number().nonnegative().default(0.02),
+    /** CTR の参考合格ライン (無形商材)。 */
+    ctrReferenceIntangible: z.number().nonnegative().default(0.01),
+    /** CTR の参考合格ライン (店舗)。 */
+    ctrReferenceStore: z.number().nonnegative().default(0.02),
+  })
+  .strict();
+
+export const AwarenessPlaybookOptimizationGoalsSchema = z
+  .object({
+    allowed: z.array(z.string().min(1)).default(["AD_RECALL_LIFT", "THRUPLAY"]),
+    forbidden: z.array(z.string().min(1)).default(["REACH", "IMPRESSIONS"]),
+  })
+  .strict();
+
+export const AwarenessPlaybookTestingSchema = z
+  .object({
+    /** 1 クリエイティブあたりのテスト日予算 (アカウント通貨)。 */
+    dailyBudgetPerCreative: z.number().nonnegative().default(1000),
+    /** 冒頭 (フック) テストの目安日数。 */
+    minTestDays: z.number().int().positive().default(2),
+    /** 1 バッチの変異体数の目安。 */
+    batchSize: z.number().int().positive().default(5),
+  })
+  .strict();
+
+export const AwarenessPlaybookAudienceSchema = z
+  .object({
+    /** 類似オーディエンス化に必要な動画視聴者リストの分母目標。 */
+    videoViewersSeedTarget: z.number().int().positive().default(1000),
+    /** 作成する類似オーディエンスの % 段階。 */
+    lookalikePercents: z.array(z.number().positive()).default([1, 3, 5]),
+  })
+  .strict();
+
+export const AwarenessPlaybookYamlSchema = z
+  .object({
+    version: z.literal(1),
+    kpi: AwarenessPlaybookKpiSchema.default({}),
+    optimizationGoals: AwarenessPlaybookOptimizationGoalsSchema.default({}),
+    testing: AwarenessPlaybookTestingSchema.default({}),
+    audience: AwarenessPlaybookAudienceSchema.default({}),
+    /**
+     * improvement_pr の各 AI agent に knowledgeBriefs としてそのまま注入する
+     * 運用ノウハウ (日本語可)。1 要素 = 1 ルール程度の短文にする。
+     */
+    briefs: z.array(z.string().min(1)).default([]),
+  })
+  .strict();
+
+export type AwarenessPlaybookYaml = z.infer<typeof AwarenessPlaybookYamlSchema>;
+
+/**
+ * プレイブックの数値閾値を、AI agent へ注入する knowledgeBriefs (文字列配列)
+ * に変換する。YAML の `briefs` 自由文の先頭に、構造化閾値から機械生成した
+ * サマリ 1 行を付ける。プレイブック未配備 (null) なら空配列。
+ */
+export function awarenessPlaybookToKnowledgeBriefs(
+  playbook: AwarenessPlaybookYaml | null
+): string[] {
+  if (!playbook) return [];
+  const goals = playbook.optimizationGoals;
+  const kpi = playbook.kpi;
+  const testing = playbook.testing;
+  const audience = playbook.audience;
+  const summary =
+    `認知(OUTCOME_AWARENESS)キャンペーンの運用ルール: ` +
+    `最適化目標は ${goals.allowed.join(" / ")} のみ使用し、${goals.forbidden.join(" / ")} は使用禁止。` +
+    `クリエイティブ合格ラインは動画100%完全視聴率 ${(kpi.videoCompletionRateMin * 100).toFixed(1)}% 以上 ` +
+    `(認知段階では CPA/CV を判定に使わない)。` +
+    `テストは 1 本あたり日 ${testing.dailyBudgetPerCreative} 予算 × ${testing.minTestDays} 日以上を ${testing.batchSize} 本並行し、勝者へ予算を寄せる。` +
+    `動画視聴者リスト ${audience.videoViewersSeedTarget} 件到達で類似オーディエンス ` +
+    `${audience.lookalikePercents.map((p) => `${p}%`).join("/")} の作成を提案する。`;
+  return [summary, ...playbook.briefs];
+}
+
 export interface OpsRepoLayout {
   projectYaml: string;
   cronYaml: string;
   budgetGuardYaml: string;
   submissionGuardsYaml: string;
   automationRulesYaml: string;
+  awarenessPlaybookYaml: string;
 }
 
 export const DEFAULT_OPS_REPO_LAYOUT: OpsRepoLayout = {
@@ -342,6 +461,7 @@ export const DEFAULT_OPS_REPO_LAYOUT: OpsRepoLayout = {
   budgetGuardYaml: "workflows/budget-guard.yaml",
   submissionGuardsYaml: "workflows/guards.yaml",
   automationRulesYaml: "workflows/automation-rules.yaml",
+  awarenessPlaybookYaml: "workflows/awareness-playbook.yaml",
 };
 
 export function loadBudgetGuardPolicy(
@@ -363,6 +483,13 @@ export function loadAutomationRules(
   layout: OpsRepoLayout = DEFAULT_OPS_REPO_LAYOUT
 ): AutomationRulesYaml | null {
   return loadYamlFile(rootDir, layout.automationRulesYaml, AutomationRulesYamlSchema);
+}
+
+export function loadAwarenessPlaybook(
+  rootDir: string,
+  layout: OpsRepoLayout = DEFAULT_OPS_REPO_LAYOUT
+): AwarenessPlaybookYaml | null {
+  return loadYamlFile(rootDir, layout.awarenessPlaybookYaml, AwarenessPlaybookYamlSchema);
 }
 
 function loadYamlFile<TSchema extends z.ZodTypeAny>(

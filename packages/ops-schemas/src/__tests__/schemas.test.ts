@@ -5,11 +5,14 @@ import os from "node:os";
 import path from "node:path";
 import {
   AutomationRulesYamlSchema,
+  AwarenessPlaybookYamlSchema,
   BudgetGuardPolicyYamlSchema,
   CronYamlSchema,
   ProjectYamlSchema,
   SubmissionGuardsYamlSchema,
+  awarenessPlaybookToKnowledgeBriefs,
   loadAutomationRules,
+  loadAwarenessPlaybook,
   loadBudgetGuardPolicy,
   loadSubmissionGuardsPolicy,
 } from "../index.js";
@@ -117,4 +120,72 @@ test("loadBudgetGuardPolicy and loadAutomationRules read ops policy files lenien
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("SubmissionGuardsYamlSchema fills awarenessOptimizationGoal defaults for legacy guards.yaml", () => {
+  const out = SubmissionGuardsYamlSchema.safeParse({
+    version: 1,
+    guards: { budgetIncrease: { warnOverRatio: 2, blockOverRatio: 5 } },
+  });
+  assert.equal(out.success, true);
+  if (out.success) {
+    const guard = out.data.guards.awarenessOptimizationGoal;
+    assert.equal(guard.mode, "warn");
+    assert.deepEqual(guard.allowedGoals, ["AD_RECALL_LIFT", "THRUPLAY"]);
+    assert.deepEqual(guard.forbiddenGoals, ["REACH", "IMPRESSIONS"]);
+    assert.deepEqual(guard.exemptFiles, []);
+  }
+});
+
+test("AwarenessPlaybookYamlSchema fills defaults from minimal yaml", () => {
+  const out = AwarenessPlaybookYamlSchema.safeParse({ version: 1 });
+  assert.equal(out.success, true);
+  if (out.success) {
+    assert.equal(out.data.kpi.videoCompletionRateMin, 0.02);
+    assert.deepEqual(out.data.optimizationGoals.allowed, ["AD_RECALL_LIFT", "THRUPLAY"]);
+    assert.equal(out.data.testing.dailyBudgetPerCreative, 1000);
+    assert.equal(out.data.audience.videoViewersSeedTarget, 1000);
+    assert.deepEqual(out.data.audience.lookalikePercents, [1, 3, 5]);
+    assert.deepEqual(out.data.briefs, []);
+  }
+});
+
+test("loadAwarenessPlaybook reads workflows/awareness-playbook.yaml and null when missing", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-ops-schemas-"));
+  try {
+    assert.equal(loadAwarenessPlaybook(dir), null);
+    fs.mkdirSync(path.join(dir, "workflows"), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "workflows", "awareness-playbook.yaml"),
+      [
+        "version: 1",
+        "kpi:",
+        "  videoCompletionRateMin: 0.03",
+        "briefs:",
+        '  - "認知広告は開始2週間以上前から出稿する"',
+        "",
+      ].join("\n"),
+      "utf8"
+    );
+    const playbook = loadAwarenessPlaybook(dir);
+    assert.ok(playbook);
+    assert.equal(playbook!.kpi.videoCompletionRateMin, 0.03);
+    assert.equal(playbook!.briefs.length, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("awarenessPlaybookToKnowledgeBriefs builds summary + free-form briefs", () => {
+  assert.deepEqual(awarenessPlaybookToKnowledgeBriefs(null), []);
+  const parsed = AwarenessPlaybookYamlSchema.parse({
+    version: 1,
+    briefs: ["フックを3パターン作って完全視聴率で比較する"],
+  });
+  const briefs = awarenessPlaybookToKnowledgeBriefs(parsed);
+  assert.equal(briefs.length, 2);
+  assert.match(briefs[0]!, /AD_RECALL_LIFT \/ THRUPLAY/);
+  assert.match(briefs[0]!, /2\.0% 以上/);
+  assert.match(briefs[0]!, /REACH \/ IMPRESSIONS/);
+  assert.equal(briefs[1], "フックを3パターン作って完全視聴率で比較する");
 });

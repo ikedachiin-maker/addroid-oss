@@ -346,6 +346,12 @@ export interface CreateImprovementPrPipelineRunnerOptions {
   workspaceId: string;
   /** 紐付ける cron_run id (linkedRefType=cron_run)。 */
   cronRunId?: string | null;
+  /**
+   * オペレーター運用プレイブック (ops repo workflows/awareness-playbook.yaml 等)
+   * 由来のノウハウ。analyst / strategy / copy / image_prompt / media_buyer の
+   * 各 agent 入力に knowledgeBriefs としてそのまま注入される。
+   */
+  knowledgeBriefs?: string[];
   /** test seam: 現在時刻。 */
   now?: () => Date;
 }
@@ -370,6 +376,13 @@ export function createImprovementPrPipelineRunner(
     return base;
   };
 
+  const knowledgeBriefs =
+    opts.knowledgeBriefs && opts.knowledgeBriefs.length > 0
+      ? opts.knowledgeBriefs
+      : null;
+  const withKnowledgeBriefs = <T extends object>(agentInput: T): T =>
+    knowledgeBriefs ? { ...agentInput, knowledgeBriefs } : agentInput;
+
   return {
     async runAnalyst(input) {
       const agentInput: AnalystAgentInput = {
@@ -387,7 +400,7 @@ export function createImprovementPrPipelineRunner(
         snapshotIds: input.snapshotIds,
       };
       try {
-        const result = await runAnalystAgent(ctxBase(), agentInput);
+        const result = await runAnalystAgent(ctxBase(), withKnowledgeBriefs(agentInput));
         return {
           aiRunInput: result.aiRunInput,
           output: result.output
@@ -427,7 +440,7 @@ export function createImprovementPrPipelineRunner(
           : {}),
       };
       try {
-        const result = await runStrategyAgent(ctxBase(), agentInput);
+        const result = await runStrategyAgent(ctxBase(), withKnowledgeBriefs(agentInput));
         return {
           aiRunInput: result.aiRunInput,
           output: result.output ?? null,
@@ -466,7 +479,7 @@ export function createImprovementPrPipelineRunner(
           : {}),
       };
       try {
-        const result = await runCopyAgent(ctxBase(), agentInput);
+        const result = await runCopyAgent(ctxBase(), withKnowledgeBriefs(agentInput));
         return {
           aiRunInput: result.aiRunInput,
           output: result.output ?? null,
@@ -556,7 +569,7 @@ export function createImprovementPrPipelineRunner(
         ],
       };
       try {
-        const result = await runImagePromptAgent(ctxBase(), agentInput);
+        const result = await runImagePromptAgent(ctxBase(), withKnowledgeBriefs(agentInput));
         return {
           aiRunInput: result.aiRunInput,
           output: result.output ?? null,
@@ -634,7 +647,7 @@ export function createImprovementPrPipelineRunner(
         analystSummary: input.analystSummary,
       };
       try {
-        const result = await runMediaBuyerAgent(ctxBase(), agentInput);
+        const result = await runMediaBuyerAgent(ctxBase(), withKnowledgeBriefs(agentInput));
         const decision =
           (result.aiRunInput.decision as
             | "propose"
