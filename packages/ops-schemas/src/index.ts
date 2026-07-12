@@ -233,6 +233,9 @@ export const AutomationRuleScopeSchema = z
     level: z.enum(["account", "campaign", "adset", "ad"]),
     accounts: z.array(z.string().min(1)).optional(),
     includePaused: z.boolean().optional(),
+    /** 親キャンペーン objective での絞り込み (includes=一致のみ残す / excludes=一致を除外)。 */
+    campaignObjectiveIncludes: z.array(z.string().min(1)).optional(),
+    campaignObjectiveExcludes: z.array(z.string().min(1)).optional(),
   })
   .passthrough();
 
@@ -446,6 +449,79 @@ export function awarenessPlaybookToKnowledgeBriefs(
   return [summary, ...playbook.briefs];
 }
 
+// ---------------------------------------------------------------------
+// Conversion playbook — コンバージョン広告運用プレイブック
+// (workflows/conversion-playbook.yaml)
+//
+// CV 広告の判断基準 (指標の優先順位 / 1000リーチ CV0 で見切る / ファネル基準値 /
+// 限界CPA=ROAS300%) を数値閾値 + prompt 注入用ブリーフとして管理する。
+// 正本の解説は ops repo の knowledge/conversion-ads-playbook.md。
+// ---------------------------------------------------------------------
+
+export const ConversionPlaybookKpiSchema = z
+  .object({
+    /** セミナー/説明会 申し込み率 (獲得リスト比) の最低ライン。既定 5%。 */
+    seminarApplicationRateMin: z.number().nonnegative().default(0.05),
+    /** オプトイン LP の登録率 (アクセス比) の合格ライン。既定 20%。 */
+    lpRegistrationRateMin: z.number().nonnegative().default(0.2),
+    /** セミナー成約率の最低ライン。既定 20%。 */
+    seminarClosingRateMin: z.number().nonnegative().default(0.2),
+    /** 個別相談 成約率の最低ライン。既定 40%。 */
+    consultClosingRateMin: z.number().nonnegative().default(0.4),
+    /** ROAS の合格ライン (限界CPA の基準)。既定 3.0 = 300%。 */
+    roasMin: z.number().nonnegative().default(3),
+    /** リンククリック CTR の下限 (これ未満は「ダメな広告」)。既定 1%。 */
+    ctrFloor: z.number().nonnegative().default(0.01),
+    /** CV 広告のフリークエンシー目安 (超えると飽きられる)。既定 2。 */
+    frequencyGuide: z.number().nonnegative().default(2),
+  })
+  .strict();
+
+export const ConversionPlaybookJudgmentSchema = z
+  .object({
+    /** このリーチ数に達して CV=0 なら見切る (最初の判断基準)。既定 1000。 */
+    noCvReachCutoff: z.number().int().positive().default(1000),
+    /** このリーチ数に達して CTR が ctrFloor 未満なら「ダメな広告」。既定 1000。 */
+    lowCtrReachCutoff: z.number().int().positive().default(1000),
+  })
+  .strict();
+
+export const ConversionPlaybookYamlSchema = z
+  .object({
+    version: z.literal(1),
+    kpi: ConversionPlaybookKpiSchema.default({}),
+    judgment: ConversionPlaybookJudgmentSchema.default({}),
+    /** improvement_pr の各 AI agent に knowledgeBriefs として注入する運用ルール。 */
+    briefs: z.array(z.string().min(1)).default([]),
+  })
+  .strict();
+
+export type ConversionPlaybookYaml = z.infer<typeof ConversionPlaybookYamlSchema>;
+
+/**
+ * CV プレイブックの数値閾値を knowledgeBriefs (文字列配列) に変換する。
+ * 未配備 (null) なら空配列。
+ */
+export function conversionPlaybookToKnowledgeBriefs(
+  playbook: ConversionPlaybookYaml | null
+): string[] {
+  if (!playbook) return [];
+  const kpi = playbook.kpi;
+  const judgment = playbook.judgment;
+  const pct = (v: number) => `${Number((v * 100).toFixed(1))}%`;
+  const summary =
+    `コンバージョン広告の判断基準: 指標の優先順位は ` +
+    `バックエンド売上/CPO/ROAS > セミナー申し込み率 > CV/CVR/CPA > CTR/CPC > CPM の順 ` +
+    `(上位指標が悪ければ下位指標がどれだけ良くても価値はない。逆に ROAS が良ければ CPA が高くてもよい)。` +
+    `最初の見切りライン=${judgment.noCvReachCutoff}リーチで CV 0 件。` +
+    `ダメな広告の定義=${judgment.lowCtrReachCutoff}リーチ超えでリンククリック CTR ${pct(kpi.ctrFloor)} 未満。` +
+    `ファネル基準値: LP 登録率 ${pct(kpi.lpRegistrationRateMin)} / セミナー申し込み率(リスト比) ${pct(kpi.seminarApplicationRateMin)} / ` +
+    `セミナー成約率 ${pct(kpi.seminarClosingRateMin)} / 個別相談成約率 ${pct(kpi.consultClosingRateMin)}。` +
+    `限界CPA = ROAS ${pct(kpi.roasMin)} を下回らない CPA を上限に設定する。` +
+    `CV 広告のフリークエンシー目安は ${kpi.frequencyGuide} 前後。`;
+  return [summary, ...playbook.briefs];
+}
+
 export interface OpsRepoLayout {
   projectYaml: string;
   cronYaml: string;
@@ -453,6 +529,7 @@ export interface OpsRepoLayout {
   submissionGuardsYaml: string;
   automationRulesYaml: string;
   awarenessPlaybookYaml: string;
+  conversionPlaybookYaml: string;
 }
 
 export const DEFAULT_OPS_REPO_LAYOUT: OpsRepoLayout = {
@@ -462,6 +539,7 @@ export const DEFAULT_OPS_REPO_LAYOUT: OpsRepoLayout = {
   submissionGuardsYaml: "workflows/guards.yaml",
   automationRulesYaml: "workflows/automation-rules.yaml",
   awarenessPlaybookYaml: "workflows/awareness-playbook.yaml",
+  conversionPlaybookYaml: "workflows/conversion-playbook.yaml",
 };
 
 export function loadBudgetGuardPolicy(
@@ -490,6 +568,13 @@ export function loadAwarenessPlaybook(
   layout: OpsRepoLayout = DEFAULT_OPS_REPO_LAYOUT
 ): AwarenessPlaybookYaml | null {
   return loadYamlFile(rootDir, layout.awarenessPlaybookYaml, AwarenessPlaybookYamlSchema);
+}
+
+export function loadConversionPlaybook(
+  rootDir: string,
+  layout: OpsRepoLayout = DEFAULT_OPS_REPO_LAYOUT
+): ConversionPlaybookYaml | null {
+  return loadYamlFile(rootDir, layout.conversionPlaybookYaml, ConversionPlaybookYamlSchema);
 }
 
 function loadYamlFile<TSchema extends z.ZodTypeAny>(

@@ -222,3 +222,100 @@ test("interpretAutomationRequestTiming asks for frequency when recurring wording
     ["schedule_hourly", "schedule_daily", "custom_schedule"]
   );
 });
+
+// ---- CV プレイブック由来ルールの評価 (computed reach/ctr + any 条件) --------
+
+test("evaluateAutomationRule: 1000リーチ CV0 ルールが computed reach で発火する", () => {
+  const rule: AutomationRuleDsl = {
+    id: "pause-cv0-after-1000reach",
+    scope: { level: "ad" },
+    window: { preset: "last_7d" },
+    metrics: {},
+    computed: { reach: "impressions / frequency" },
+    when: {
+      all: [{ metric: "conversions", eq: 0 }],
+      any: [
+        { metric: "reach", gte: 1000 },
+        { metric: "impressions", gte: 1500 },
+      ],
+    },
+    action: { type: "set_status", status: "PAUSED" },
+    safety: { mode: "proposal" },
+  };
+  const subjects: AutomationMetricSubject[] = [
+    {
+      accountId: "acc-1",
+      level: "ad",
+      targetKey: "ad-hit",
+      status: "ACTIVE",
+      metrics: { conversions: 0, impressions: 1300, frequency: 1.2, spend: 900 },
+    },
+    {
+      // reach 未達 (1000 未満) かつ impressions 未達 → skip
+      accountId: "acc-1",
+      level: "ad",
+      targetKey: "ad-early",
+      status: "ACTIVE",
+      metrics: { conversions: 0, impressions: 600, frequency: 1.1, spend: 300 },
+    },
+    {
+      // CV が付いている → skip
+      accountId: "acc-1",
+      level: "ad",
+      targetKey: "ad-converting",
+      status: "ACTIVE",
+      metrics: { conversions: 3, impressions: 4000, frequency: 1.5, spend: 4000 },
+    },
+    {
+      // frequency 無し → reach null だが impressions フォールバックで発火
+      accountId: "acc-1",
+      level: "ad",
+      targetKey: "ad-no-frequency",
+      status: "ACTIVE",
+      metrics: { conversions: 0, impressions: 2000, frequency: null, spend: 1500 },
+    },
+  ];
+  const out = evaluateAutomationRule(rule, subjects);
+  assert.deepEqual(
+    out.plannedActions.map((a) => a.targetKey).sort(),
+    ["ad-hit", "ad-no-frequency"]
+  );
+});
+
+test("evaluateAutomationRule: 低CTRルール (リーチ超え & CTR<1%) が computed ctr で発火する", () => {
+  const rule: AutomationRuleDsl = {
+    id: "pause-low-ctr-ads",
+    scope: { level: "ad" },
+    window: { preset: "last_7d" },
+    metrics: {},
+    computed: { ctr: "clicks / impressions", reach: "impressions / frequency" },
+    when: {
+      all: [{ metric: "ctr", lt: 0.01 }],
+      any: [
+        { metric: "reach", gte: 1000 },
+        { metric: "impressions", gte: 1500 },
+      ],
+    },
+    action: { type: "set_status", status: "PAUSED" },
+    safety: { mode: "proposal" },
+  };
+  const subjects: AutomationMetricSubject[] = [
+    {
+      accountId: "acc-1",
+      level: "ad",
+      targetKey: "ad-low-ctr",
+      status: "ACTIVE",
+      metrics: { clicks: 5, impressions: 2000, frequency: 1.3, conversions: 0 },
+    },
+    {
+      // CTR 1.5% → skip
+      accountId: "acc-1",
+      level: "ad",
+      targetKey: "ad-good-ctr",
+      status: "ACTIVE",
+      metrics: { clicks: 30, impressions: 2000, frequency: 1.3, conversions: 1 },
+    },
+  ];
+  const out = evaluateAutomationRule(rule, subjects);
+  assert.deepEqual(out.plannedActions.map((a) => a.targetKey), ["ad-low-ctr"]);
+});

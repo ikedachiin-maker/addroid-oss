@@ -516,6 +516,12 @@ function toExecutableDsl(rule: AutomationRuleYaml): AutomationRuleDsl | null {
       level: rule.scope.level,
       ...(rule.scope.accounts ? { accounts: rule.scope.accounts } : {}),
       ...(rule.scope.includePaused !== undefined ? { includePaused: rule.scope.includePaused } : {}),
+      ...(rule.scope.campaignObjectiveIncludes
+        ? { campaignObjectiveIncludes: rule.scope.campaignObjectiveIncludes }
+        : {}),
+      ...(rule.scope.campaignObjectiveExcludes
+        ? { campaignObjectiveExcludes: rule.scope.campaignObjectiveExcludes }
+        : {}),
     },
     window: {
       preset: rule.window.preset ?? "today",
@@ -571,7 +577,96 @@ async function loadSubjectsForRule(input: {
   });
   const rows = insights.current.filter((row) => row.nodeType === input.rule.scope.level);
   const hierarchy = await loadHierarchyIndex(input.prisma, input.account.id, rows);
-  return rows.map((row) => toSubject(input.account.id, input.account.key, row, hierarchy));
+  const subjects = rows.map((row) => toSubject(input.account.id, input.account.key, row, hierarchy));
+  return filterSubjectsByCampaignObjective(
+    subjects,
+    input.rule.scope,
+    await loadCampaignObjectiveResolver(input.prisma, input.account.id, input.rule.scope)
+  );
+}
+
+/**
+ * scope.campaignObjectiveIncludes / campaignObjectiveExcludes による subject の
+ * 絞り込み (pure 関数、unit test 対象)。
+ *
+ * - includes 指定時: objective が判明し includes に一致する subject のみ残す。
+ * - excludes 指定時: objective が判明し excludes に一致する subject を除外する。
+ *   objective 不明 (階層に無い / spec に objective が無い) の subject は残す。
+ *
+ * 例: 「1000リーチ CV0 で停止提案」ルールに
+ * campaignObjectiveExcludes: [OUTCOME_AWARENESS] を付けると、CV=0 が正常な
+ * 認知広告に毎時の停止提案が誤発火するのを防げる。
+ */
+export function filterSubjectsByCampaignObjective(
+  subjects: AutomationMetricSubject[],
+  scope: AutomationRuleDsl["scope"],
+  objectiveByTargetKey: Map<string, string>
+): AutomationMetricSubject[] {
+  const includes = (scope.campaignObjectiveIncludes ?? []).map((v) => v.toUpperCase());
+  const excludes = (scope.campaignObjectiveExcludes ?? []).map((v) => v.toUpperCase());
+  if (includes.length === 0 && excludes.length === 0) return subjects;
+  return subjects.filter((subject) => {
+    const objective = objectiveByTargetKey.get(subject.targetKey)?.toUpperCase() ?? null;
+    if (includes.length > 0) {
+      return objective !== null && includes.includes(objective);
+    }
+    return objective === null || !excludes.includes(objective);
+  });
+}
+
+/**
+ * account の ads_hierarchy 全体を 1 回読み、targetKey (insights 行の nodeKey =
+ * Meta ID または YAML 安定キー) → 祖先 campaign の objective を引ける Map を作る。
+ * objective は GitOps 由来 spec (`payload.objective`) と mirror-sync 由来 spec
+ * (`raw.objective`) の両方から解決する。scope に objective 条件が無い場合は
+ * DB を読まず空 Map を返す。
+ */
+async function loadCampaignObjectiveResolver(
+  prisma: PrismaClient,
+  accountId: string,
+  scope: AutomationRuleDsl["scope"]
+): Promise<Map<string, string>> {
+  const wanted =
+    (scope.campaignObjectiveIncludes?.length ?? 0) > 0 ||
+    (scope.campaignObjectiveExcludes?.length ?? 0) > 0;
+  if (!wanted) return new Map();
+  const nodes = await prisma.adsHierarchyNode.findMany({
+    where: { accountId },
+    select: {
+      id: true,
+      parentId: true,
+      nodeType: true,
+      nodeKey: true,
+      externalId: true,
+      spec: true,
+    },
+  });
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const campaignObjective = (node: (typeof nodes)[number]): string | null => {
+    const spec = (node.spec ?? {}) as Record<string, unknown>;
+    const payload = spec.payload as Record<string, unknown> | undefined;
+    const raw = spec.raw as Record<string, unknown> | undefined;
+    const objective = payload?.objective ?? raw?.objective;
+    return typeof objective === "string" && objective.length > 0 ? objective : null;
+  };
+  const resolveObjective = (node: (typeof nodes)[number]): string | null => {
+    let current: (typeof nodes)[number] | undefined = node;
+    for (let hops = 0; current && hops < 6; hops += 1) {
+      if (current.nodeType === "campaign") return campaignObjective(current);
+      current = current.parentId ? byId.get(current.parentId) : undefined;
+    }
+    return null;
+  };
+  const out = new Map<string, string>();
+  for (const node of nodes) {
+    const objective = resolveObjective(node);
+    if (!objective) continue;
+    out.set(node.nodeKey, objective);
+    if (node.externalId && node.externalId !== node.nodeKey) {
+      out.set(node.externalId, objective);
+    }
+  }
+  return out;
 }
 
 async function loadHierarchyIndex(

@@ -157,3 +157,27 @@ Prisma 規約（`prisma/schema.prisma`）に準拠: `@@map` スネークケー�
   （本設計書の日5,000円と整合）。
 - ThruPlay 成果課金（15秒以上視聴のみ課金）の可用性をアカウント実績に応じてチェックし、
   選択可能になったら billing_event=THRUPLAY への切り替えを提案する。
+
+## 2026-07-11 追記(2) — コンバージョン広告運用プレイブック取り込み
+
+CV 広告の判断基準（同講座 2025-11-26 林パート + Bootcamp 2日目）も取り込んだ。
+正本: ops repo `knowledge/conversion-ads-playbook.md`、閾値: `workflows/conversion-playbook.yaml`。
+
+**実装済み:**
+
+- `improvement_pr` の knowledgeBriefs に CV プレイブックも注入（認知と合わせて注入される）。
+- 自動化ルール2本を追加（毎時・提案のみ・承認制）:
+  `pause-cv0-after-1000reach`（1,000リーチで CV 0 → 停止提案）と
+  `pause-low-ctr-ads`（リーチ超過 & リンク CTR 1% 未満 =「ダメな広告」→ 停止提案）。
+- automation rules エンジンに **キャンペーン objective スコープフィルタ**
+  （`scope.campaignObjectiveIncludes / Excludes`）を追加。CV 判定ルールは
+  `OUTCOME_AWARENESS` 配下を除外し、認知広告（CV=0 が正常）への誤発火を防ぐ。
+  既存 `pause-no-cv-ads` にも同除外を適用。
+
+**Phase 2 への反映事項:**
+
+- CV 目的へ切り替えた実験の判定は CV プレイブックの優先順位
+  （バックエンド/CPO/ROAS > セミナー申し込み率 > CV/CVR/CPA > CTR/CPC > CPM）と
+  限界CPA（ROAS 300% を下回らない CPA）を使う。目標 CPA 2,000円 と整合。
+- 実験の早期見切り: 変異体が 1,000リーチ CV0 または CTR<1% ならサンプル下限を
+  待たずに停止候補としてよい（judgment 値は conversion-playbook.yaml を参照）。

@@ -6,13 +6,16 @@ import path from "node:path";
 import {
   AutomationRulesYamlSchema,
   AwarenessPlaybookYamlSchema,
+  ConversionPlaybookYamlSchema,
   BudgetGuardPolicyYamlSchema,
   CronYamlSchema,
   ProjectYamlSchema,
   SubmissionGuardsYamlSchema,
   awarenessPlaybookToKnowledgeBriefs,
+  conversionPlaybookToKnowledgeBriefs,
   loadAutomationRules,
   loadAwarenessPlaybook,
+  loadConversionPlaybook,
   loadBudgetGuardPolicy,
   loadSubmissionGuardsPolicy,
 } from "../index.js";
@@ -188,4 +191,71 @@ test("awarenessPlaybookToKnowledgeBriefs builds summary + free-form briefs", () 
   assert.match(briefs[0]!, /2\.0% 以上/);
   assert.match(briefs[0]!, /REACH \/ IMPRESSIONS/);
   assert.equal(briefs[1], "フックを3パターン作って完全視聴率で比較する");
+});
+
+test("ConversionPlaybookYamlSchema fills defaults and loader reads yaml", () => {
+  const out = ConversionPlaybookYamlSchema.safeParse({ version: 1 });
+  assert.equal(out.success, true);
+  if (out.success) {
+    assert.equal(out.data.kpi.seminarApplicationRateMin, 0.05);
+    assert.equal(out.data.kpi.lpRegistrationRateMin, 0.2);
+    assert.equal(out.data.kpi.roasMin, 3);
+    assert.equal(out.data.judgment.noCvReachCutoff, 1000);
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "addroid-ops-schemas-cv-"));
+  try {
+    assert.equal(loadConversionPlaybook(dir), null);
+    fs.mkdirSync(path.join(dir, "workflows"), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "workflows", "conversion-playbook.yaml"),
+      ["version: 1", "judgment:", "  noCvReachCutoff: 2000", ""].join("\n"),
+      "utf8"
+    );
+    const playbook = loadConversionPlaybook(dir);
+    assert.ok(playbook);
+    assert.equal(playbook!.judgment.noCvReachCutoff, 2000);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("conversionPlaybookToKnowledgeBriefs builds priority summary + free-form briefs", () => {
+  assert.deepEqual(conversionPlaybookToKnowledgeBriefs(null), []);
+  const parsed = ConversionPlaybookYamlSchema.parse({
+    version: 1,
+    briefs: ["LPと広告の訴求を一致させる"],
+  });
+  const briefs = conversionPlaybookToKnowledgeBriefs(parsed);
+  assert.equal(briefs.length, 2);
+  assert.match(briefs[0]!, /バックエンド売上\/CPO\/ROAS > セミナー申し込み率/);
+  assert.match(briefs[0]!, /1000リーチで CV 0 件/);
+  assert.match(briefs[0]!, /CTR 1% 未満/);
+  assert.match(briefs[0]!, /ROAS 300%/);
+  assert.equal(briefs[1], "LPと広告の訴求を一致させる");
+});
+
+test("AutomationRuleScopeSchema accepts campaignObjective filters", () => {
+  const out = AutomationRulesYamlSchema.safeParse({
+    version: 1,
+    rules: [
+      {
+        id: "pause-cv0-after-1000reach",
+        enabled: true,
+        scope: {
+          level: "ad",
+          campaignObjectiveExcludes: ["OUTCOME_AWARENESS"],
+        },
+        when: { all: [{ metric: "conversions", eq: 0 }] },
+        action: { type: "set_status", status: "PAUSED" },
+      },
+    ],
+  });
+  assert.equal(out.success, true);
+  if (out.success) {
+    assert.deepEqual(
+      (out.data.rules[0]!.scope as { campaignObjectiveExcludes?: string[] })
+        .campaignObjectiveExcludes,
+      ["OUTCOME_AWARENESS"]
+    );
+  }
 });

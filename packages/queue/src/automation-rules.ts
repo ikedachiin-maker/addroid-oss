@@ -23,6 +23,16 @@ export interface AutomationRuleScope {
   level: AutomationLevel;
   accounts?: string[];
   includePaused?: boolean;
+  /**
+   * 親キャンペーンの objective による絞り込み (worker 側の subject 構築時に適用)。
+   * includes 指定時は objective が判明かつ一致する subject のみ残す。
+   * excludes 指定時は objective が判明かつ一致する subject を除外する
+   * (objective 不明の subject は残す)。
+   * 例: CV 判定ルールに campaignObjectiveExcludes: [OUTCOME_AWARENESS] を付け、
+   * 認知広告 (CV=0 が正常) への誤発火を防ぐ。
+   */
+  campaignObjectiveIncludes?: string[];
+  campaignObjectiveExcludes?: string[];
 }
 
 export interface AutomationMetricSpec {
