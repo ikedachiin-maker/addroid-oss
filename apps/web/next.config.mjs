@@ -7,6 +7,10 @@
 const nextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
+  // CF Tunnel (addroid.ad-marketing.net) 経由の dev アクセスを許可する。
+  // Next 16 は localhost 以外のオリジンからの /_next/* (HMR 含む) をブロックするため、
+  // これが無いと画面は描画されてもハイドレーションが走らずボタンが無反応になる。
+  allowedDevOrigins: ["addroid.ad-marketing.net"],
   images: {
     // 画像最適化を行わない (outbound-only ポリシー & ローカル静的アセットのみ想定)
     unoptimized: true,
