@@ -23,6 +23,31 @@ AdDroid は **localhost-only / outbound-only** で動作するセルフホスト
 **AdDroid 側から outbound** で起動します。inbound webhook / 公開 URL を要求する変更は
 **コントラクト違反** であり受け入れません。
 
+### 1.1 Web UI を外部公開する場合 (最重要)
+
+**Web UI にはログイン機能がありません。**弱い認証ではなく、認証そのものが存在しません。
+`/approvals` `/accounts` `/budget` `/setup` を含む全ページが素通しで、
+**ポートに到達できた人はそのまま広告アカウントの管理者**です。127.0.0.1 でしか
+listen しない前提で成立している設計です。
+
+`apps/web/lib/request-guard.ts` は名前が紛らわしいのですが **CSRF 対策であって認証では
+ありません**。合言葉は tracked source に書かれた固定値で、ブラウザ以外からのリクエストは
+素通しします。
+
+したがって、トンネル (Cloudflare Tunnel / ngrok / Tailscale Funnel 等) で外から
+アクセスできるようにする場合は、**認証プロキシを必ず前段に置いてください**。
+
+| やること | 内容 |
+|---|---|
+| 必須 | Cloudflare Access / Tailscale ACL / mTLS など、**AdDroid に到達する前に認証を終える**仕組みを置く |
+| 必須 | `ADDROID_DEV_ORIGINS=<公開ホスト名>` を env で設定する (`next.config.mjs` に直書きしない) |
+| 確認 | 公開後に `curl -I https://<公開ホスト>/api/health` が **認証画面へリダイレクトされる**ことを実測する |
+| 禁止 | 認証プロキシ無しでの公開。広告費の承認画面が誰でも押せる状態になります |
+
+`addroid status` や `/setup` が表示するバインドアドレスは **env から導出した「意図」**であり、
+実際の listen 状態ではありません。`next dev -H 0.0.0.0` のように直接起動すると
+127.0.0.1 の保証は破れますが、画面上は `127.0.0.1:3000` のまま表示されます。
+
 ---
 
 ## 2. Secrets の取扱い

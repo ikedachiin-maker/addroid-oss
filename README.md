@@ -1,5 +1,18 @@
 # AdDroid OSS
 
+> **これは fork です。** 本家は [`bb8ad8/addroid-oss`](https://github.com/bb8ad8/addroid-oss)
+> (Apache-2.0)。本 fork が本家に加えた変更は次のとおりです。
+>
+> - 認知広告の運用プレイブックを `improvement_pr` の 8 エージェントへ `knowledgeBriefs` として注入
+> - コンバージョン広告の運用プレイブックを同様に注入し、CV 判定ルールと objective スコープを追加
+> - `apply` 成功時にクリエイティブ変更の監査記録を残す
+> - dev origin を `ADDROID_DEV_ORIGINS` から読む (トンネル経由アクセス用)
+> - `oss:hygiene` に広告アカウント ID / Meta オブジェクト ID / ホスト名の検出ルールを追加
+> - `addroid init` が既存の `ENCRYPTION_KEY` / `DATABASE_URL` を再利用したときに警告する
+>
+> ライセンスは本家と同じ Apache-2.0 です。`LICENSE` を参照してください。
+> **他の人に配る前に** [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md) を必ず読んでください。
+
 AdDroid は、Meta 広告運用を **GitOps** として管理するためのセルフホスト可能な OSS です。
 Ads YAML をリポジトリの単一ソースとして扱い、AI が広告案・改善案を生成し、AdDroid が
 GitHub PR と監査ログで変更を管理し、pg-boss Cron でレポート取得・予算監視・改善提案を

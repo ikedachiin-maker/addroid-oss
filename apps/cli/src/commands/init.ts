@@ -2517,7 +2517,25 @@ function formatScaffoldResult(result: ScaffoldResult): string[] {
 function formatEnvResult(result: EnvEnsureResult): string[] {
   const changed = result.updated.length > 0 ? result.updated.join(", ") : "none";
   const kept = result.kept.length > 0 ? `; kept existing: ${result.kept.join(", ")}` : "";
-  return [`  env           : ${result.path} ${result.wrote ? "(updated)" : "(unchanged)"}`, `                  updated: ${changed}${kept}`];
+  const lines = [
+    `  env           : ${result.path} ${result.wrote ? "(updated)" : "(unchanged)"}`,
+    `                  updated: ${changed}${kept}`,
+  ];
+  // 既存の ENCRYPTION_KEY / DATABASE_URL は上書きしない。ディレクトリごと受け渡された
+  // 環境ではこれが「前の所有者の鍵」であり、保存済みトークンを相互に復号できてしまう。
+  // git clone 以外の経路で配布された場合に気づけるよう、必ず警告を出す。
+  const inherited = ["ENCRYPTION_KEY", "DATABASE_URL"].filter((key) =>
+    result.kept.includes(key)
+  );
+  if (inherited.length > 0) {
+    lines.push(
+      `                  warning: 既存の ${inherited.join(" / ")} を再利用しました。`,
+      "                           このディレクトリを他者から受け取った場合は使い続けないでください。",
+      "                           .env から該当行を削除して `addroid init` を再実行し、",
+      "                           各 provider を接続し直してください (`addroid connect <provider>`)。"
+    );
+  }
+  return lines;
 }
 
 function formatCommandOutcome(label: string, outcome: { ok: boolean; detail: string }): string[] {

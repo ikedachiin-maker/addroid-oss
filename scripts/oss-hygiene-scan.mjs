@@ -82,7 +82,35 @@ function buildPersonalGithubLoginPattern(logins) {
   return new RegExp(`\\b(?:${alt})\\b`);
 }
 
+// 事業ドメイン / 自前ホスト名の denylist。GitHub login と同じ規約で env から読む:
+//   export ADDROID_PERSONAL_HOSTNAME_DENYLIST="example.com,ops.example.net"
+// トンネル公開時のホスト名を next.config などに直書きしたまま配布する事故を防ぐ。
+function loadPersonalHostnameDenylist() {
+  const raw = process.env.ADDROID_PERSONAL_HOSTNAME_DENYLIST || "";
+  const validHostname = /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/;
+  return raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s.length > 0 && s.includes(".") && validHostname.test(s));
+}
+
+function buildPersonalHostnamePattern(hostnames) {
+  if (hostnames.length === 0) {
+    return /(?!)/;
+  }
+  // hostname は上で英数 + ドット + ハイフンに制限済。ドットのみ escape する。
+  const alt = hostnames.map((h) => h.replace(/\./g, "\\.")).join("|");
+  return new RegExp(`\\b(?:${alt})\\b`, "i");
+}
+
 const PERSONAL_GITHUB_LOGINS = loadPersonalGithubDenylist();
+const PERSONAL_HOSTNAMES = loadPersonalHostnameDenylist();
+
+// テスト / mock / placeholder は架空の Meta ID を大量に使うため、ID 系 rule の
+// 対象から外す。実 ID の混入を止めたいのは配布物として動く source と docs。
+const EXCLUDE_FIXTURE_FILES = [
+  /^(?!.*(?:__tests__\/|\/mock|mock\.ts|placeholder|\.test\.|package-lock\.json)).*$/,
+];
 
 // ----------------------------------------------------------------------------
 // パターン定義
@@ -129,6 +157,46 @@ const RULES = [
       "個人 GitHub アカウント名をハードコードしない。owner は package.json#repository.url 由来、" +
       "または DB / config / env から読む。検出対象の login は env " +
       "`ADDROID_PERSONAL_GITHUB_DENYLIST=<login1>,<login2>` で設定する。",
+    severity: "error",
+    binarySafe: true,
+  },
+  {
+    id: "meta-ad-account-id",
+    label: "Real Meta ad account id (act_...)",
+    // placeholder は 10 桁 (act_1234567890 / act_9876543210) で運用しているため、
+    // 11 桁以上を実アカウント ID とみなす。実 ID は 15-16 桁。
+    pattern: /\bact_\d{11,}\b/,
+    onlyFiles: EXCLUDE_FIXTURE_FILES,
+    hint:
+      "実在の広告アカウント ID を書かない。アカウントは DB / ops repo の " +
+      "accounts/<key>/ から解決する。例示には act_1234567890 を使う。",
+    severity: "error",
+    binarySafe: true,
+  },
+  {
+    id: "meta-object-id",
+    label: "Real Meta object id (campaign / adset / ad)",
+    // Meta の campaign / adset / ad id は 1 始まりの 17 桁以上。ms 単位の
+    // epoch (13 桁) や npm の integrity 文字列とは桁数で分離できる。
+    // lock ファイル等のノイズを避けるため source tree に限定する。
+    pattern: /\b1\d{16,}\b/,
+    onlyFiles: EXCLUDE_FIXTURE_FILES,
+    hint:
+      "実在の campaign / adset / ad ID を書かない。ID は Meta Graph API か " +
+      "ops repo の YAML から解決する。",
+    severity: "error",
+    binarySafe: false,
+  },
+  {
+    id: "personal-hostname",
+    label: "Personal / business hostname (config-driven denylist)",
+    // 検出対象は env `ADDROID_PERSONAL_HOSTNAME_DENYLIST` から読む
+    // (ドメインそのものを tracked source に書かないため)。未設定時は no-op。
+    pattern: buildPersonalHostnamePattern(PERSONAL_HOSTNAMES),
+    hint:
+      "自前ドメイン / トンネルのホスト名をハードコードしない。dev origin は env " +
+      "`ADDROID_DEV_ORIGINS` から読む。検出対象は env " +
+      "`ADDROID_PERSONAL_HOSTNAME_DENYLIST=<host1>,<host2>` で設定する。",
     severity: "error",
     binarySafe: true,
   },

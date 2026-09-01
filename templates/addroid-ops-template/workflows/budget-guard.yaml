@@ -4,11 +4,15 @@ version: 1
 # 5 種類のしきい値を評価する。各値を 0 (もしくは未指定) にするとそのルールは
 # 無効。ファイル全体が存在しない場合は worker 側で **fail-closed** に倒れ、
 # Meta は変更されず ai_runs も書かれず status="policy_missing" となる。
+#
+# 比率で判定するルールは通貨に依存しないため、既定で有効にしてある。
+# 金額で判定する noConversionsSpendMin だけは通貨によって妥当な値が変わるので
+# 0 (無効) のまま置いてある。**配信を始める前に自分の通貨で値を入れること。**
 alerts:
-  dailyBudgetAlertRatio: 0     # 当日 spend / dailyBudget >= 0.8 で alert (例: 0.8)
-  monthlyPaceRatio: 0          # MTD spend / 月予算 prorated >= 1.0 で alert
-  dayOverDayRatio: 0           # todaySpend / yesterdaySpend >= 1.5 で alert
-  noConversionsSpendMin: 0     # CV=0 かつ todaySpend >= N で alert (currency major unit)
+  dailyBudgetAlertRatio: 0.8   # 当日 spend / dailyBudget >= 0.8 で alert
+  monthlyPaceRatio: 1.0        # MTD spend / 月予算 prorated >= 1.0 で alert
+  dayOverDayRatio: 1.5         # todaySpend / yesterdaySpend >= 1.5 で alert
+  noConversionsSpendMin: 0     # CV=0 かつ todaySpend >= N で alert (例: JPY なら 5000)
 
 # autoPause を有効にすると、しきい値超過時に audit agent へ auto_pause 候補が
 # 渡る (= AI が Meta を直接停止することはない。auto_apply mode + safeCategories
@@ -20,7 +24,14 @@ autoPause:
   minDayOverDayRatio: 0
   safeCategories: []
 
-# Optional per-account budgets (currency major unit)。
-# キーは AdDroid の ad account key と一致させる。未指定の account は budget=0 として
-# 扱われ、daily_budget_80 / monthly_pace ルールは静かに skip。
+# Per-account budgets (currency major unit)。
+# キーは AdDroid の ad account key と一致させる。
+#
+# ⚠ ここが空のままだと dailyBudgetAlertRatio / monthlyPaceRatio は **静かに skip** され、
+#   使いすぎの警告は鳴らない。配信を始める前に必ず自分のアカウントを追加すること。
+#
+#   accounts:
+#     act_1234567890:
+#       dailyBudget: 10000
+#       monthlyBudget: 300000
 accounts: {}

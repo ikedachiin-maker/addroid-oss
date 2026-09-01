@@ -235,6 +235,37 @@ test("init は DATABASE_URL の有無で database.urlRef を再評価する", as
   });
 });
 
+test("init は引き継いだ ENCRYPTION_KEY / DATABASE_URL を再利用したら警告する", async () => {
+  await withTempHome(async (home) => {
+    const prevDb = process.env.DATABASE_URL;
+    const prevKey = process.env.ENCRYPTION_KEY;
+    delete process.env.DATABASE_URL;
+    delete process.env.ENCRYPTION_KEY;
+    // 配布元の .env をそのまま受け取った状態 (placeholder ではない実値) を作る。
+    fs.writeFileSync(
+      path.join(home, ".env"),
+      [
+        "DATABASE_URL=postgresql://addroid:inherited@localhost:5432/addroid",
+        "ENCRYPTION_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "",
+      ].join("\n"),
+      { encoding: "utf8", mode: 0o600 }
+    );
+    try {
+      const { out } = await capture(() =>
+        runInit(["--yes", "--non-interactive", "--skip-deps"])
+      );
+      assert.match(out.stdout, /warning: 既存の .*ENCRYPTION_KEY/);
+      assert.match(out.stdout, /他者から受け取った場合は使い続けないでください/);
+    } finally {
+      if (prevDb === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = prevDb;
+      if (prevKey === undefined) delete process.env.ENCRYPTION_KEY;
+      else process.env.ENCRYPTION_KEY = prevKey;
+    }
+  });
+});
+
 test("init は初期設定済みなら無印の対話再実行を状態表示だけで終了する", async () => {
   await withTempHome(async (home) => {
     const prevDb = process.env.DATABASE_URL;
