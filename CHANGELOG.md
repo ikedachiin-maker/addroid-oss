@@ -35,6 +35,96 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ---
 
+## [Unreleased]
+
+## [0.2.0] - 2026-06-13
+
+### Added — 提案採否トラッキング
+
+- 改善 PR の承認・非承認結果を次回提案へ反映する提案採否フィードバックを追加し、非承認理由の記録、media_buyer ai_run と PR の紐づけ、`/improvements` の採否サマリ表示を追加。
+
+### Added — 最小 A/B テスト管理
+
+- 同一広告セット内の2広告を比較する最小 A/B テスト管理として `experiments` モデル、`create_experiment` Agent tool、`experiment_evaluate` cron preset、`/experiments` 画面、敗者 PAUSE 提案 PR 作成を追加。
+
+### Added — 予算再配分 PR
+
+- CPA 効率に基づく `budget_rebalance` cron preset、`workflows/budget-rebalance.yaml` policy、GitOps PR 提案、`/budget` の予算再配分ビューを追加。
+
+### Added — 自然言語実績クエリ
+
+- 自然言語の実績問い合わせ向けに `query_performance` / `compare_performance` Agent tool と安全な定型集計カタログを追加。
+
+### Added — Analyst 二段階異常検知
+
+- `daily_report` の Analyst 入力を決定論的な異常検知 findings 中心に二段化し、`/reports/daily` に検知された変化テーブルを追加。
+
+### Added — 配信面プレビュー
+
+- `/creatives/[id]` と `/approvals/[prNumber]` に Feed / Stories / Carousel のHTMLモックフレーム型クリエイティブプレビューを追加。
+
+### Added — カルーセル反映 (Phase 2)
+
+- GitOps apply が carousel creative operation を検証し、card image を `adimages` に順次 upload して `child_attachments` 付き adcreative と PAUSED ad を作成できる Phase 2 経路を追加。
+
+### Added — カルーセル生成 (Phase 1)
+
+- `creativeFormat=carousel` 指定時に copy / image_prompt agent がカード別画像を生成し、複数 asset を 1 つの carousel creative として QA・PR 証跡・`/creatives` UI に保存表示できる Phase 1 経路を追加。
+
+### Added — 配置別アスペクト比の自動展開
+
+- `placementSet` 指定時に 1 つの image_prompt 案を Feed/Stories/Reels/リンク広告向け複数アスペクト比へ決定論的に展開し、生成数上限と詳細画面の variant グループ表示を追加。
+
+### Added — クリエイティブ実績フィードバックループ
+
+- 直近 28 日の creative 実績から勝ち/負けパターンと遺伝子別 insight を作る digest を追加し、`improvement_pr` の copy / image_prompt agent 入力へ注入するフィードバックループを追加。
+- `/creatives` 一覧に creative 実績 (impressions / CTR / verdict) の表示を追加。
+
+### Added — クリエイティブ遺伝子タグ
+
+- Creative QA agent が閉じた語彙の CreativeGenes (訴求軸・トーン・被写体・配色・構図など) を推定し、`creatives.genes` と metadata.json に保存するように追加。
+- `/creatives` に訴求軸チップ表示と訴求軸フィルタを追加し、`/creatives/[id]` で CreativeGenes の全フィールドを確認できるように追加。
+
+### Added — パフォーマンスメトリクス拡充
+
+- `performance_snapshots` に reach / frequency / link click / video view / ranking diagnostics を nullable 指標として追加。
+- `daily_report` / `today_report` の Meta insights 取得・保存・Analyst 入力・日次レポート画面に CTR / CPM / frequency などの拡張メトリクスを追加。
+
+### Added — 統計ユーティリティ
+
+- `packages/queue` に Wilson 信頼区間、二項比率比較、外れ値スコア、サンプル信頼ラベルの統計ユーティリティを追加。
+- 日次レポートに CTR/CVR の統計比較と信頼区間表示を追加し、Analyst agent がサンプル不足の変化を断定しないように拡張。
+
+### Added — 既存環境の簡単アップデート
+
+- `addroid update` コマンドを追加。`git pull` で新しいバージョンを取り込んだあと、
+  これ 1 つで Prisma クライアント再生成 (`db:generate`) と DB スキーマ反映 (`db:push`) を
+  実行する。新機能はすべて nullable カラム / default / optional フィールドで追加されるため
+  既存データを保持したまま追従でき、破壊的変更を検出した場合のみ停止して
+  `addroid backup` → `addroid update --force` を案内する (fail-closed)。
+- `addroid doctor` に `schema-drift` チェックを追加。`prisma migrate diff --exit-code` で
+  DB スキーマとコードの乖離を検知し、未反映の変更があれば `addroid update` を案内する。
+- 既存ユーザー向けのアップデート手順を [`docs/UPDATE.md`](docs/UPDATE.md) に新設。
+- `addroid update` が CLI バンドルも再ビルドするようにし、`git pull` 後の新コマンド・新挙動が
+  `addroid <command>` (グローバル) に反映されるようにした。初回のみ `npm run addroid -- update`
+  でブートストラップすれば、以降は `addroid update` だけで最新化できる。
+- `addroid update` が依存更新 (`npm install`) も実行するようにし、更新フローを
+  `git pull` → `addroid update` の 2 手に簡素化した (`--skip-install` で省略可)。
+
+### Added — リリースノートの GitHub 自動発行
+
+- `v*` タグの push をトリガーに GitHub Release を自動発行する `release` ワークフロー
+  ([`.github/workflows/release.yml`](.github/workflows/release.yml)) を追加。Release 本文は
+  `scripts/extract-changelog.mjs` が CHANGELOG の該当セクションから抽出するため、CHANGELOG を
+  唯一の source of truth に保ったまま「何が変わったか」が Releases ページで一目で分かる。
+  ハイフンを含むタグは prerelease として発行する。
+- マージ済み PR をラベル別に整形する GitHub 自動リリースノート設定
+  ([`.github/release.yml`](.github/release.yml)) を追加。
+- CHANGELOG 抽出スクリプトと単体テスト (`npm run test:scripts`) を追加。
+- [`docs/RELEASE.md`](docs/RELEASE.md) Step 8 を「タグ push → 自動発行」に更新。
+
+---
+
 ## [0.1.0] - 2026-06-03
 
 > AdDroid OSS の初回 OSS 公開リリース。`addroid init` / `addroid start` / `addroid status` /

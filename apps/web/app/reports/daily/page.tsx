@@ -10,6 +10,7 @@
 // 明示的な空状態 UI を出す。
 
 import Link from "next/link";
+import { wilsonInterval } from "@addroid/queue";
 import { prisma } from "../../../lib/prisma";
 import { Panel } from "../../../components/ui/Panel";
 import { PageHeader } from "../../../components/ui/PageHeader";
@@ -61,12 +62,47 @@ interface DailyReportSummary {
   current: KpiSet;
   prior: KpiSet;
   deltas: Record<string, string>;
+  statisticalContext: StatisticalContext;
+  anomalies: AnomalyDetectionSummary;
+  anomalyDetectionError?: string;
   snapshotIds: string[];
   aiCommentary: string | null;
   topImprovements: ImprovementCandidate[];
   aiRunId: string | null;
   errorMessage?: string;
   mode: string;
+}
+
+interface AnomalyFinding {
+  hierarchy: string;
+  nodeKey: string;
+  displayName: string;
+  metric: string;
+  kind: string;
+  currentValue: number;
+  baselineValue: number;
+  relativeChange: number | null;
+  confidence: string;
+  severity: string;
+}
+
+interface AnomalyDetectionSummary {
+  findings: AnomalyFinding[];
+  evaluatedNodeCount: number;
+  quietDay: boolean;
+}
+
+interface StatisticalComparison {
+  metric: string;
+  verdict: string;
+  pApprox: number | null;
+  relativeChange: number | null;
+  minTrialsMet: boolean;
+}
+
+interface StatisticalContext {
+  comparisons: StatisticalComparison[];
+  confidence: "reliable" | "indicative" | "insufficient";
 }
 
 interface CronRunRow {
@@ -90,6 +126,8 @@ interface SnapshotRow {
   clicks: number;
   spendMicros: bigint;
   conversions: number;
+  frequency: number | { toNumber(): number } | null;
+  linkClicks: number | null;
   source: string;
   createdAt: Date;
 }
@@ -179,6 +217,8 @@ function parseDailyReportSummary(output: unknown): DailyReportSummary | null {
           expectedImpact: readString(row.expectedImpact),
         }))
     : [];
+  const statisticalContext = parseStatisticalContext(output.statisticalContext);
+  const anomalies = parseAnomalies(output.anomalies);
   return {
     status: output.status,
     workspaceId: output.workspaceId,
@@ -192,6 +232,11 @@ function parseDailyReportSummary(output: unknown): DailyReportSummary | null {
     current: readKpi(output.current),
     prior: readKpi(output.prior),
     deltas,
+    statisticalContext,
+    anomalies,
+    ...(typeof output.anomalyDetectionError === "string"
+      ? { anomalyDetectionError: output.anomalyDetectionError }
+      : {}),
     snapshotIds,
     aiCommentary:
       typeof output.aiCommentary === "string" ? output.aiCommentary : null,
@@ -202,6 +247,51 @@ function parseDailyReportSummary(output: unknown): DailyReportSummary | null {
       : {}),
     mode: readString(output.mode, "report_only"),
   };
+}
+
+function parseAnomalies(value: unknown): AnomalyDetectionSummary {
+  if (!isRecord(value)) {
+    return { findings: [], evaluatedNodeCount: 0, quietDay: true };
+  }
+  const findings = Array.isArray(value.findings)
+    ? value.findings.filter(isRecord).map((row) => ({
+        hierarchy: readString(row.hierarchy),
+        nodeKey: readString(row.nodeKey),
+        displayName: readString(row.displayName, readString(row.nodeKey)),
+        metric: readString(row.metric),
+        kind: readString(row.kind),
+        currentValue: readNumber(row.currentValue),
+        baselineValue: readNumber(row.baselineValue),
+        relativeChange: readNullableNumber(row.relativeChange),
+        confidence: readString(row.confidence, "insufficient"),
+        severity: readString(row.severity, "low"),
+      }))
+    : [];
+  return {
+    findings,
+    evaluatedNodeCount: readNumber(value.evaluatedNodeCount),
+    quietDay: value.quietDay === true || findings.length === 0,
+  };
+}
+
+function parseStatisticalContext(value: unknown): StatisticalContext {
+  if (!isRecord(value)) return { comparisons: [], confidence: "insufficient" };
+  const confidence =
+    value.confidence === "reliable" ||
+    value.confidence === "indicative" ||
+    value.confidence === "insufficient"
+      ? value.confidence
+      : "insufficient";
+  const comparisons = Array.isArray(value.comparisons)
+    ? value.comparisons.filter(isRecord).map((row) => ({
+        metric: readString(row.metric),
+        verdict: readString(row.verdict, "insufficient_data"),
+        pApprox: readNullableNumber(row.pApprox),
+        relativeChange: readNullableNumber(row.relativeChange),
+        minTrialsMet: row.minTrialsMet === true,
+      }))
+    : [];
+  return { comparisons, confidence };
 }
 
 function parseDailyReportSummaries(output: unknown): DailyReportSummary[] {
@@ -336,8 +426,35 @@ function formatFrequency(n: number | null): string {
   return n === null ? "—" : formatNumber(n, 2);
 }
 
+function decimalToNumber(value: number | { toNumber(): number } | null): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "object" && value !== null && typeof value.toNumber === "function") {
+    const n = value.toNumber();
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function formatNullablePercent(value: number | null): string {
+  return value === null ? "—" : formatPercent(value);
+}
+
 function formatDelta(value: string | undefined): string {
   return value && value.length > 0 ? value : "—";
+}
+
+function formatRate(n: number | null): string {
+  return n === null ? "—" : formatPercent(n * 100);
+}
+
+function cvr(k: KpiSet): number | null {
+  return k.clicks > 0 ? k.conversions / k.clicks : null;
+}
+
+function formatWilson(successes: number, trials: number): string {
+  const ci = wilsonInterval(successes, trials);
+  if (ci.lower === null || ci.upper === null) return "95% CI —";
+  return `95% CI ${formatPercent(ci.lower * 100)}–${formatPercent(ci.upper * 100)}`;
 }
 
 interface KpiCellProps {
@@ -383,12 +500,13 @@ function KpiCell({ label, value, delta, hint }: KpiCellProps) {
   );
 }
 
-function reportKpiRows(currency: string | null): {
+function reportKpiRows(summary: DailyReportSummary): {
   label: string;
   valueOf: (k: KpiSet) => string;
   deltaKey: string;
   hint?: string;
 }[] {
+  const currency = summary.currency;
   return [
     {
       label: "Spend",
@@ -397,7 +515,18 @@ function reportKpiRows(currency: string | null): {
     },
     { label: "Impressions", valueOf: (k) => formatNumber(k.impressions), deltaKey: "impressions" },
     { label: "Clicks", valueOf: (k) => formatNumber(k.clicks), deltaKey: "clicks" },
-    { label: "CTR", valueOf: (k) => formatPercent(k.ctr), deltaKey: "ctr" },
+    {
+      label: "CTR",
+      valueOf: (k) => formatPercent(k.ctr),
+      deltaKey: "ctr",
+      hint: formatWilson(summary.current.clicks, summary.current.impressions),
+    },
+    {
+      label: "CVR",
+      valueOf: (k) => formatRate(cvr(k)),
+      deltaKey: "cvr",
+      hint: formatWilson(summary.current.conversions, summary.current.clicks),
+    },
     {
       label: "CPC",
       valueOf: (k) => formatCurrency(k.cpc, currency),
@@ -416,6 +545,111 @@ function reportKpiRows(currency: string | null): {
     },
     { label: "Frequency", valueOf: (k) => formatFrequency(k.frequency), deltaKey: "frequency" },
   ];
+}
+
+function comparisonBadgeState(verdict: string): StatusState {
+  switch (verdict) {
+    case "significant_increase":
+      return "ok";
+    case "significant_decrease":
+      return "warn";
+    case "insufficient_data":
+      return "warn";
+    case "not_significant":
+    default:
+      return "idle";
+  }
+}
+
+function comparisonBadgeLabel(comparison: StatisticalComparison): string {
+  const metric = comparison.metric.toUpperCase();
+  switch (comparison.verdict) {
+    case "significant_increase":
+      return `${metric}: 有意な増加`;
+    case "significant_decrease":
+      return `${metric}: 有意な低下`;
+    case "not_significant":
+      return `${metric}: 有意差なし`;
+    case "insufficient_data":
+    default:
+      return `${metric}: 参考値 (サンプル不足)`;
+  }
+}
+
+function confidenceBadge(summary: DailyReportSummary) {
+  const labels: Record<StatisticalContext["confidence"], string> = {
+    reliable: "統計信頼度: 高",
+    indicative: "統計信頼度: 参考",
+    insufficient: "統計信頼度: サンプル不足",
+  };
+  const state: Record<StatisticalContext["confidence"], StatusState> = {
+    reliable: "ok",
+    indicative: "info",
+    insufficient: "warn",
+  };
+  const confidence = summary.statisticalContext.confidence;
+  return <StatusBadge state={state[confidence]}>{labels[confidence]}</StatusBadge>;
+}
+
+function anomalySeverityState(severity: string): StatusState {
+  switch (severity) {
+    case "high":
+      return "error";
+    case "medium":
+      return "warn";
+    case "low":
+      return "info";
+    default:
+      return "idle";
+  }
+}
+
+function anomalySeverityLabel(severity: string): string {
+  const labels: Record<string, string> = {
+    high: "高",
+    medium: "中",
+    low: "低",
+  };
+  return labels[severity] ?? severity;
+}
+
+function anomalyMetricLabel(metric: string): string {
+  const labels: Record<string, string> = {
+    spend: "Spend",
+    impressions: "Impressions",
+    conversions: "CV",
+    ctr: "CTR",
+    cvr: "CVR",
+    cpa: "CPA",
+    frequency: "Frequency",
+  };
+  return labels[metric] ?? metric;
+}
+
+function anomalyKindLabel(kind: string): string {
+  const labels: Record<string, string> = {
+    spike: "増加",
+    drop: "低下",
+    trend: "傾向",
+  };
+  return labels[kind] ?? kind;
+}
+
+function formatAnomalyValue(finding: AnomalyFinding, value: number): string {
+  if (finding.metric === "ctr" || finding.metric === "cvr") {
+    return formatRate(value);
+  }
+  if (finding.metric === "frequency") {
+    return formatFrequency(value);
+  }
+  return formatNumber(value);
+}
+
+function formatRelativeChange(value: number | null): string {
+  if (value === null) return "—";
+  const pct = value * 100;
+  const sign = pct > 0 ? "+" : "";
+  return `${sign}${pct.toFixed(1)}%`;
 }
 
 function summaryItems(summary: DailyReportSummary, displayTimeZone: string): KeyValueEntry[] {
@@ -487,7 +721,7 @@ function DailyReportDetail({
   summary: DailyReportSummary;
   displayTimeZone: string;
 }) {
-  const kpiRows = reportKpiRows(summary.currency);
+  const kpiRows = reportKpiRows(summary);
   return (
     <div style={{ display: "grid", gap: "1.25rem" }}>
       <KeyValueList items={summaryItems(summary, displayTimeZone)} />
@@ -508,6 +742,84 @@ function DailyReportDetail({
             {...(kpi.hint ? { hint: kpi.hint } : {})}
           />
         ))}
+      </div>
+
+      <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+        {confidenceBadge(summary)}
+        {summary.statisticalContext.comparisons.map((comparison) => (
+          <StatusBadge
+            key={`${comparison.metric}:${comparison.verdict}`}
+            state={comparisonBadgeState(comparison.verdict)}
+          >
+            {comparisonBadgeLabel(comparison)}
+          </StatusBadge>
+        ))}
+      </div>
+
+      <div>
+        <div
+          style={{
+            fontSize: "0.75rem",
+            fontWeight: 600,
+            letterSpacing: "0.06em",
+            textTransform: "uppercase",
+            color: "var(--color-text-secondary)",
+            marginBottom: "0.5rem",
+          }}
+        >
+          検知された変化
+        </div>
+        {summary.anomalyDetectionError ? (
+          <div style={{ color: "var(--color-status-warn)", fontSize: "0.8125rem" }}>
+            異常検知に失敗したため、従来のAIコメント方式にフォールバックしました。
+          </div>
+        ) : summary.anomalies.findings.length === 0 ? (
+          <div style={{ color: "var(--color-text-secondary)", fontSize: "0.875rem" }}>
+            特筆すべき変化はありませんでした。
+          </div>
+        ) : (
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>重要度</th>
+                  <th>階層</th>
+                  <th>対象</th>
+                  <th>指標</th>
+                  <th>変化</th>
+                  <th>当日</th>
+                  <th>基準</th>
+                  <th>信頼度</th>
+                </tr>
+              </thead>
+              <tbody>
+                {summary.anomalies.findings.map((finding, idx) => (
+                  <tr key={`${finding.hierarchy}:${finding.nodeKey}:${finding.metric}:${idx}`}>
+                    <td>
+                      <StatusBadge state={anomalySeverityState(finding.severity)}>
+                        {anomalySeverityLabel(finding.severity)}
+                      </StatusBadge>
+                    </td>
+                    <td>{hierarchyLabel(finding.hierarchy)}</td>
+                    <td>
+                      {finding.displayName}
+                      <div style={{ color: "var(--color-text-tertiary)", fontSize: "0.75rem" }}>
+                        {finding.nodeKey}
+                      </div>
+                    </td>
+                    <td>{anomalyMetricLabel(finding.metric)}</td>
+                    <td>
+                      {anomalyKindLabel(finding.kind)} {formatRelativeChange(finding.relativeChange)}
+                    </td>
+                    <td>{formatAnomalyValue(finding, finding.currentValue)}</td>
+                    <td>{formatAnomalyValue(finding, finding.baselineValue)}</td>
+                    <td>{finding.confidence}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {summary.aiCommentary ? (
@@ -682,6 +994,8 @@ export default async function ReportsDailyPage({
           clicks: true,
           spendMicros: true,
           conversions: true,
+          frequency: true,
+          linkClicks: true,
           source: true,
           createdAt: true,
         },
@@ -862,6 +1176,38 @@ export default async function ReportsDailyPage({
       cell: (row) => (
         <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
           {formatNumber(row.clicks)}
+        </span>
+      ),
+      className: "tabular",
+      headerClassName: "tabular",
+    },
+    {
+      header: "CTR",
+      cell: (row) => (
+        <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
+          {formatNullablePercent(row.impressions > 0 ? (row.clicks / row.impressions) * 100 : null)}
+        </span>
+      ),
+      className: "tabular",
+      headerClassName: "tabular",
+    },
+    {
+      header: "CPM",
+      cell: (row) => (
+        <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
+          {row.impressions > 0
+            ? formatNumber((microsToMajor(row.spendMicros) / row.impressions) * 1000, 2)
+            : "—"}
+        </span>
+      ),
+      className: "tabular",
+      headerClassName: "tabular",
+    },
+    {
+      header: "Frequency",
+      cell: (row) => (
+        <span className="tabular-nums" style={{ fontFamily: "var(--font-mono)" }}>
+          {formatFrequency(decimalToNumber(row.frequency))}
         </span>
       ),
       className: "tabular",

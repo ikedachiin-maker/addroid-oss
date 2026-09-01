@@ -61,7 +61,10 @@ import {
 } from "@addroid/github-adapter";
 import {
   IMPROVEMENT_PR_IMAGE_DIMENSION_PRESETS,
+  creativePerformanceExampleGenes,
+  creativePerformanceGeneInsightLines,
   type DailyReportAdAccountSnapshot,
+  type CreativePerformanceDigest,
   type ImprovementPrAuditClassification,
   type ImprovementPrAuditDecision,
   type ImprovementPrAuditInput,
@@ -85,14 +88,16 @@ import {
   landingPageUrlForPrompt,
 } from "./creative-landing-page-context.js";
 import { runPlanForRoot } from "./plan-runtime.js";
+import { createPrismaProposalFeedbackStore } from "./proposal-feedback-runtime.js";
 
 // ---------------------------------------------------------------------
 // Snapshot store — Prisma 実装 (findAdAccount + createAiRun)
 // ---------------------------------------------------------------------
 
 export function createPrismaImprovementPrStore(
-  prisma: PrismaClient
+  prisma: PrismaClient,
 ): ImprovementPrStore {
+  const proposalFeedbackStore = createPrismaProposalFeedbackStore(prisma);
   return {
     async findAdAccount(input): Promise<DailyReportAdAccountSnapshot | null> {
       const row = await prisma.adAccount.findUnique({
@@ -117,6 +122,99 @@ export function createPrismaImprovementPrStore(
         metaAccountId: row.metaAccountId,
         currency: "JPY",
       };
+    },
+    async listAdCreativePerformance(input) {
+      const snapshots = await prisma.performanceSnapshot.findMany({
+        where: {
+          accountId: input.accountId,
+          nodeType: "ad",
+          metricDate: {
+            gte: new Date(`${input.since}T00:00:00.000Z`),
+            lte: new Date(`${input.until}T00:00:00.000Z`),
+          },
+        },
+        select: {
+          id: true,
+          accountId: true,
+          nodeType: true,
+          nodeKey: true,
+          metricDate: true,
+          impressions: true,
+          clicks: true,
+          conversions: true,
+          spendMicros: true,
+          hierarchy: {
+            select: {
+              id: true,
+              accountId: true,
+              nodeType: true,
+              nodeKey: true,
+              displayName: true,
+            },
+          },
+        },
+      });
+      const hierarchyIds = [
+        ...new Set(
+          snapshots
+            .map((snapshot) => snapshot.hierarchy?.id)
+            .filter((id): id is string => typeof id === "string"),
+        ),
+      ];
+      if (hierarchyIds.length === 0) return [];
+      const creatives = await prisma.creative.findMany({
+        where: {
+          accountId: input.accountId,
+          hierarchyId: { in: hierarchyIds },
+          status: { in: ["merged", "active_on_meta"] },
+        },
+        orderBy: [{ updatedAt: "desc" }],
+        select: {
+          id: true,
+          key: true,
+          displayName: true,
+          genes: true,
+          spec: true,
+          prompt: true,
+          status: true,
+          updatedAt: true,
+          hierarchyId: true,
+        },
+      });
+      const creativesByHierarchy = new Map<string, typeof creatives>();
+      for (const creative of creatives) {
+        if (!creative.hierarchyId) continue;
+        const list = creativesByHierarchy.get(creative.hierarchyId);
+        if (list) {
+          list.push(creative);
+        } else {
+          creativesByHierarchy.set(creative.hierarchyId, [creative]);
+        }
+      }
+      return snapshots.flatMap((snapshot) => {
+        const hierarchy = snapshot.hierarchy;
+        if (!hierarchy) return [];
+        const creativeRows = creativesByHierarchy.get(hierarchy.id) ?? [];
+        return creativeRows.map((creative) => ({
+          snapshotRow: {
+            id: snapshot.id,
+            accountId: snapshot.accountId,
+            nodeType: snapshot.nodeType,
+            nodeKey: snapshot.nodeKey,
+            metricDate: snapshot.metricDate,
+            impressions: snapshot.impressions,
+            clicks: snapshot.clicks,
+            conversions: snapshot.conversions,
+            spendMicros: snapshot.spendMicros,
+          },
+          hierarchyRow: hierarchy,
+          creativeRow: creative,
+          ambiguous: creativeRows.length > 1,
+        }));
+      });
+    },
+    async listProposalOutcomes(input) {
+      return await proposalFeedbackStore.listProposalOutcomes(input);
     },
     async createAiRun(data: AiRunCreateInputData): Promise<{ id: string }> {
       const created = await prisma.aiRun.create({
@@ -145,6 +243,15 @@ export function createPrismaImprovementPrStore(
         select: { id: true },
       });
       return { id: created.id };
+    },
+    async linkAiRunToPullRequest(input): Promise<void> {
+      await prisma.aiRun.update({
+        where: { id: input.aiRunId },
+        data: {
+          linkedRefType: "github_pull_request",
+          linkedRefId: input.pullRequestId,
+        },
+      });
     },
     async createCreative(data): Promise<{ id: string }> {
       // regression fix: image_prompt の prompt/negativePrompt/styleNotes/rationale
@@ -180,7 +287,11 @@ export function createPrismaImprovementPrStore(
           })),
           rationale: data.qa.rationale,
         },
+        genes: data.genes ?? null,
       };
+      if (data.carouselSpec) {
+        spec.carousel = data.carouselSpec;
+      }
       const created = await prisma.creative.create({
         data: {
           accountId: data.accountId,
@@ -211,6 +322,10 @@ export function createPrismaImprovementPrStore(
           parameters:
             data.parameters !== undefined && data.parameters !== null
               ? (data.parameters as unknown as Prisma.InputJsonValue)
+              : Prisma.JsonNull,
+          genes:
+            data.genes !== undefined && data.genes !== null
+              ? (data.genes as unknown as Prisma.InputJsonValue)
               : Prisma.JsonNull,
         },
         select: { id: true },
@@ -278,7 +393,8 @@ export function createPrismaImprovementPrStore(
         if (row.creativeQaAiRunId === null) {
           ineligible.push({
             id,
-            reason: "creativeQaAiRunId is null (per-asset QA was never recorded)",
+            reason:
+              "creativeQaAiRunId is null (per-asset QA was never recorded)",
           });
           continue;
         }
@@ -316,11 +432,9 @@ export function createPrismaImprovementPrStore(
         }
       }
       if (ineligible.length > 0) {
-        const detail = ineligible
-          .map((e) => `${e.id}: ${e.reason}`)
-          .join("; ");
+        const detail = ineligible.map((e) => `${e.id}: ${e.reason}`).join("; ");
         throw new Error(
-          `improvement_pr: refusing to link creatives to PR without complete per-asset QA: ${detail}`
+          `improvement_pr: refusing to link creatives to PR without complete per-asset QA: ${detail}`,
         );
       }
       await prisma.creative.updateMany({
@@ -357,7 +471,7 @@ export interface CreateImprovementPrPipelineRunnerOptions {
 }
 
 export function createImprovementPrPipelineRunner(
-  opts: CreateImprovementPrPipelineRunnerOptions
+  opts: CreateImprovementPrPipelineRunnerOptions,
 ): ImprovementPrPipelineRunner {
   const ctxBase = () => {
     const linkedRefId = opts.cronRunId ?? null;
@@ -396,7 +510,9 @@ export function createImprovementPrPipelineRunner(
           ? { priorPeriodEnd: input.analysisWindow.priorPeriodEnd }
           : {}),
         current: input.analysisWindow.current,
-        ...(input.analysisWindow.prior ? { prior: input.analysisWindow.prior } : {}),
+        ...(input.analysisWindow.prior
+          ? { prior: input.analysisWindow.prior }
+          : {}),
         snapshotIds: input.snapshotIds,
       };
       try {
@@ -438,6 +554,9 @@ export function createImprovementPrPipelineRunner(
         ...(input.creativeContext?.notes
           ? { constraints: input.creativeContext.notes }
           : {}),
+        ...(input.workspaceFeedback
+          ? { workspaceFeedback: input.workspaceFeedback }
+          : {}),
       };
       try {
         const result = await runStrategyAgent(ctxBase(), withKnowledgeBriefs(agentInput));
@@ -467,15 +586,34 @@ export function createImprovementPrPipelineRunner(
           input.creativeContext?.references[0]
             ? `winning reference=${input.creativeContext.references[0].displayName}`
             : null,
-        ].filter(Boolean).join(" / "),
-        brandTone: input.creativeContext?.brandProfile?.tone ?? "operator-grade",
+        ]
+          .filter(Boolean)
+          .join(" / "),
+        brandTone:
+          input.creativeContext?.brandProfile?.tone ?? "operator-grade",
         productOffer: [
           input.recommendedApproach,
           input.creativeContext?.target?.creative?.headline,
           input.creativeContext?.references[0]?.creative?.headline,
-        ].filter(Boolean).join(" / "),
+        ]
+          .filter(Boolean)
+          .join(" / "),
         ...(input.creativeContext?.brandProfile?.forbiddenTerms
-          ? { forbiddenKeywords: input.creativeContext.brandProfile.forbiddenTerms }
+          ? {
+              forbiddenKeywords:
+                input.creativeContext.brandProfile.forbiddenTerms,
+            }
+          : {}),
+        ...(input.performanceDigest
+          ? {
+              performanceContext: copyPerformanceContext(
+                input.performanceDigest,
+              ),
+            }
+          : {}),
+        ...(input.creativeFormat ? { format: input.creativeFormat } : {}),
+        ...(input.carouselCardCount
+          ? { carouselCardCount: input.carouselCardCount }
           : {}),
       };
       try {
@@ -498,19 +636,20 @@ export function createImprovementPrPipelineRunner(
     async runImagePrompt(input) {
       const creativeContext = await addLandingPageBriefToCreativeContext(
         opts.provider,
-        input.creativeContext ?? null
+        input.creativeContext ?? null,
       );
       const performance: ImagePromptAgentInput["performance"] = {
         periodLabel: `${input.analysisWindow.periodStart}..${input.analysisWindow.periodEnd}`,
-        recentKpis:
-          metricsToRecord(
-            creativeContext?.target?.current ??
-            input.analysisWindow.current
-          ),
+        recentKpis: metricsToRecord(
+          creativeContext?.target?.current ?? input.analysisWindow.current,
+        ),
         analystCommentary: input.analystCommentary,
         placementSignals: placementSignalsFromCreativeContext(creativeContext),
       };
       const target = creativeContext?.target;
+      const performanceNotes = input.performanceDigest
+        ? creativePerformanceGeneInsightLines(input.performanceDigest)
+        : [];
       const agentInput: ImagePromptAgentInput = {
         accountId: input.accountId,
         audienceSummary: input.audienceFocus,
@@ -528,9 +667,11 @@ export function createImprovementPrPipelineRunner(
           strategySummary: [
             input.strategy.recommendedApproach,
             input.strategy.audienceFocus,
-          ].filter(Boolean).join(" / "),
+          ]
+            .filter(Boolean)
+            .join(" / "),
           rationale: input.strategy.rationale,
-          notes: creativeContext?.notes ?? [],
+          notes: [...(creativeContext?.notes ?? []), ...performanceNotes],
         },
         ...(target
           ? {
@@ -540,30 +681,56 @@ export function createImprovementPrPipelineRunner(
                 displayName: target.displayName,
                 status: target.status ?? null,
                 current: metricsToRecord(target.current),
-                ...(target.prior ? { prior: metricsToRecord(target.prior) } : {}),
+                ...(target.prior
+                  ? { prior: metricsToRecord(target.prior) }
+                  : {}),
                 rationale: target.rationale,
-                currentCreative: sanitizeCreativeForPrompt(target.creative ?? null),
+                currentCreative: sanitizeCreativeForPrompt(
+                  target.creative ?? null,
+                ),
               },
             }
           : {}),
         ...(creativeContext
           ? {
-              referenceCreatives: creativeContext.references.map((r) => ({
-                hierarchy: r.hierarchy,
-                nodeKey: r.nodeKey,
-                displayName: r.displayName,
-                current: metricsToRecord(r.current),
-                rationale: r.rationale,
-                creative: sanitizeCreativeForPrompt(r.creative ?? null),
-              })),
+              referenceCreatives: [
+                ...creativeContext.references.map((r) => ({
+                  hierarchy: r.hierarchy,
+                  nodeKey: r.nodeKey,
+                  displayName: r.displayName,
+                  current: metricsToRecord(r.current),
+                  rationale: r.rationale,
+                  creative: sanitizeCreativeForPrompt(r.creative ?? null),
+                })),
+                ...referenceCreativesFromDigest(
+                  input.performanceDigest ?? null,
+                ),
+              ],
               creativeStrategy: creativeContext.strategy,
             }
-          : {}),
+          : input.performanceDigest
+            ? {
+                referenceCreatives: referenceCreativesFromDigest(
+                  input.performanceDigest,
+                ),
+                creativeStrategy: "scale_winner" as const,
+              }
+            : {}),
         variantCount: 3,
+        ...(input.placementSet ? { placementSet: input.placementSet } : {}),
+        ...(input.carousel
+          ? {
+              carouselCards: input.carousel.cards.map((card) => ({
+                position: card.position,
+                imageBrief: card.imageBrief,
+                headline: card.headline,
+              })),
+            }
+          : {}),
         dimensionPresets: IMPROVEMENT_PR_IMAGE_DIMENSION_PRESETS,
         policyConstraints: [
           ...(creativeContext?.brandProfile?.forbiddenTerms ?? []).map(
-            (term) => `forbidden:${term}`
+            (term) => `forbidden:${term}`,
           ),
           "no_trademarked_logos",
         ],
@@ -614,7 +781,7 @@ export function createImprovementPrPipelineRunner(
         ) {
           const merged = mergeDeterministicCreativeQa(
             result.output,
-            input.generatedAssets
+            input.generatedAssets,
           );
           return {
             aiRunInput: result.aiRunInput,
@@ -645,6 +812,9 @@ export function createImprovementPrPipelineRunner(
         currentDailyBudget: input.currentDailyBudget,
         riskTolerance: input.riskTolerance,
         analystSummary: input.analystSummary,
+        ...(input.workspaceFeedback
+          ? { workspaceFeedback: input.workspaceFeedback }
+          : {}),
       };
       try {
         const result = await runMediaBuyerAgent(ctxBase(), withKnowledgeBriefs(agentInput));
@@ -761,7 +931,8 @@ function failedAiRun(args: FailedAiRunArgs): {
   output: null;
   error: string;
 } {
-  const message = args.err instanceof Error ? args.err.message : String(args.err);
+  const message =
+    args.err instanceof Error ? args.err.message : String(args.err);
   const startedAt = args.opts.now ? args.opts.now() : new Date();
   const linkedRefId = args.opts.cronRunId ?? null;
   const aiRunInput = buildAiRunCreateInput({
@@ -789,8 +960,74 @@ function failedAiRun(args: FailedAiRunArgs): {
   return { aiRunInput, output: null, error: message };
 }
 
+function copyPerformanceContext(
+  digest: CreativePerformanceDigest,
+): NonNullable<CopyAgentInput["performanceContext"]> {
+  return {
+    winningExamples: digest.winners
+      .filter((entry) => entry.headline && entry.primaryText)
+      .slice(0, 3)
+      .map((entry) => {
+        const genes = creativePerformanceExampleGenes(entry.genes);
+        return {
+          headline: entry.headline!,
+          primaryText: entry.primaryText!,
+          ...(genes ? { genes } : {}),
+          ...(entry.metrics.ctr !== null ? { ctr: entry.metrics.ctr } : {}),
+        };
+      }),
+    losingExamples: digest.losers
+      .filter((entry) => entry.headline && entry.primaryText)
+      .slice(0, 3)
+      .map((entry) => {
+        const genes = creativePerformanceExampleGenes(entry.genes);
+        return {
+          headline: entry.headline!,
+          primaryText: entry.primaryText!,
+          ...(genes ? { genes } : {}),
+        };
+      }),
+    geneInsights: creativePerformanceGeneInsightLines(digest),
+  };
+}
+
+function referenceCreativesFromDigest(
+  digest: CreativePerformanceDigest | null,
+): NonNullable<ImagePromptAgentInput["referenceCreatives"]> {
+  if (!digest) return [];
+  return digest.winners.slice(0, 3).map((entry) => ({
+    hierarchy: "ad" as const,
+    nodeKey: entry.creativeKey,
+    displayName: entry.displayName,
+    current: {
+      impressions: entry.metrics.impressions,
+      clicks: entry.metrics.clicks,
+      conversions: entry.metrics.conversions,
+      spend: entry.metrics.spendMajor,
+      ...(entry.metrics.ctr !== null ? { ctr: entry.metrics.ctr } : {}),
+      ...(entry.metrics.cpaMajor !== null
+        ? { cpa: entry.metrics.cpaMajor }
+        : {}),
+    },
+    rationale: [
+      `creative performance verdict=${entry.verdict}`,
+      creativePerformanceExampleGenes(entry.genes),
+    ]
+      .filter(Boolean)
+      .join(" / "),
+    creative: {
+      key: entry.creativeKey,
+      displayName: entry.displayName,
+      headline: entry.headline,
+      primaryText: entry.primaryText,
+      callToAction: null,
+      linkUrl: null,
+    },
+  }));
+}
+
 function metricsToRecord(
-  metrics: ImprovementPrPerformanceMetrics
+  metrics: ImprovementPrPerformanceMetrics,
 ): Record<string, number> {
   const out: Record<string, number> = {
     spend: metrics.spend,
@@ -804,7 +1041,9 @@ function metricsToRecord(
   return out;
 }
 
-function sanitizeCreativeForPrompt<T extends { linkUrl?: string | null } | null>(creative: T): T {
+function sanitizeCreativeForPrompt<
+  T extends { linkUrl?: string | null } | null,
+>(creative: T): T {
   if (!creative) return creative;
   return {
     ...creative,
@@ -813,7 +1052,7 @@ function sanitizeCreativeForPrompt<T extends { linkUrl?: string | null } | null>
 }
 
 function placementSignalsFromCreativeContext(
-  context: ImprovementPrCreativeGenerationContext | null
+  context: ImprovementPrCreativeGenerationContext | null,
 ): string[] {
   if (!context) return [];
   const out: string[] = [];
@@ -821,7 +1060,8 @@ function placementSignalsFromCreativeContext(
   const add = (value: unknown, label: string) => {
     const summary = placementSummaryFromValue(value);
     if (summary) out.push(`${label}: ${summary}`);
-    for (const category of placementCategoriesFromValue(value)) covered.add(category);
+    for (const category of placementCategoriesFromValue(value))
+      covered.add(category);
   };
   add(context.target?.spec, "target");
   context.references.slice(0, 3).forEach((ref, index) => {
@@ -829,10 +1069,16 @@ function placementSignalsFromCreativeContext(
   });
   for (const note of context.notes ?? []) add(note, "note");
   if (covered.size > 0) {
-    const missing = ["feed_square", "feed_portrait", "story_reels", "feed_landscape"]
-      .filter((category) => !covered.has(category));
+    const missing = [
+      "feed_square",
+      "feed_portrait",
+      "story_reels",
+      "feed_landscape",
+    ].filter((category) => !covered.has(category));
     if (missing.length > 0) {
-      out.push(`coverage_gap: no clear evidence for ${missing.join(", ")} in current creative context`);
+      out.push(
+        `coverage_gap: no clear evidence for ${missing.join(", ")} in current creative context`,
+      );
     }
   }
   return [...new Set(out)].slice(0, 8);
@@ -840,11 +1086,13 @@ function placementSignalsFromCreativeContext(
 
 function placementSummaryFromValue(value: unknown): string | null {
   const text = JSON.stringify(value ?? "").toLowerCase();
-  if (!text || text === "\"\"") return null;
+  if (!text || text === '""') return null;
   const surfaces: string[] = [];
-  if (text.includes("story") || text.includes("stories")) surfaces.push("stories");
+  if (text.includes("story") || text.includes("stories"))
+    surfaces.push("stories");
   if (text.includes("reel")) surfaces.push("reels");
-  if (text.includes("feed") || text.includes("stream") || text.includes("home")) surfaces.push("feed");
+  if (text.includes("feed") || text.includes("stream") || text.includes("home"))
+    surfaces.push("feed");
   if (text.includes("facebook")) surfaces.push("facebook");
   if (text.includes("instagram")) surfaces.push("instagram");
   if (text.includes("messenger")) surfaces.push("messenger");
@@ -852,17 +1100,21 @@ function placementSummaryFromValue(value: unknown): string | null {
   if (text.includes("4:5") || text.includes("portrait")) surfaces.push("4:5");
   if (text.includes("9:16")) surfaces.push("9:16");
   if (text.includes("1:1") || text.includes("square")) surfaces.push("1:1");
-  if (text.includes("1.91:1") || text.includes("landscape")) surfaces.push("1.91:1");
+  if (text.includes("1.91:1") || text.includes("landscape"))
+    surfaces.push("1.91:1");
   return surfaces.length > 0 ? [...new Set(surfaces)].join(", ") : null;
 }
 
 function placementCategoriesFromValue(value: unknown): string[] {
   const text = JSON.stringify(value ?? "").toLowerCase();
-  if (!text || text === "\"\"") return [];
+  if (!text || text === '""') return [];
   const out = new Set<string>();
-  if (text.includes("story") || text.includes("reel") || text.includes("9:16")) out.add("story_reels");
-  if (text.includes("portrait") || text.includes("4:5")) out.add("feed_portrait");
-  if (text.includes("landscape") || text.includes("1.91:1")) out.add("feed_landscape");
+  if (text.includes("story") || text.includes("reel") || text.includes("9:16"))
+    out.add("story_reels");
+  if (text.includes("portrait") || text.includes("4:5"))
+    out.add("feed_portrait");
+  if (text.includes("landscape") || text.includes("1.91:1"))
+    out.add("feed_landscape");
   if (
     text.includes("feed") ||
     text.includes("stream") ||
@@ -893,7 +1145,7 @@ function placementCategoriesFromValue(value: unknown): string[] {
  */
 function mergeDeterministicCreativeQa(
   llmOutput: ImprovementPrCreativeQaOutput,
-  assets: readonly ImprovementPrCreativeQaAssetCheck[]
+  assets: readonly ImprovementPrCreativeQaAssetCheck[],
 ): ImprovementPrCreativeQaOutput {
   if (assets.length === 0) return llmOutput;
   const inputs: CreativeQaAssetInput[] = assets.map((a) => {
@@ -920,7 +1172,10 @@ function mergeDeterministicCreativeQa(
     if (a.detectedText !== undefined && a.detectedText !== null) {
       input.detectedText = a.detectedText;
     }
-    if (a.providerQualityScore !== undefined && a.providerQualityScore !== null) {
+    if (
+      a.providerQualityScore !== undefined &&
+      a.providerQualityScore !== null
+    ) {
       input.providerQualityScore = a.providerQualityScore;
     }
     return input;
@@ -982,11 +1237,11 @@ export interface CreateImprovementPrGithubPublisherOptions {
  * - branch 名は `gitops` agent が出した `branchName` をそのまま使う。
  */
 export function createImprovementPrGithubPublisher(
-  opts: CreateImprovementPrGithubPublisherOptions
+  opts: CreateImprovementPrGithubPublisherOptions,
 ): ImprovementPrGithubPublisher {
   return {
     async createPullRequest(
-      req: ImprovementPrPullRequestRequest
+      req: ImprovementPrPullRequestRequest,
     ): Promise<ImprovementPrPullRequestRecord> {
       const ws = await opts.prisma.workspace.findUnique({
         where: { id: opts.workspaceId },
@@ -994,7 +1249,7 @@ export function createImprovementPrGithubPublisher(
       });
       if (!ws?.opsRepoId) {
         throw new Error(
-          "improvement_pr: workspace has no ops repository connected"
+          "improvement_pr: workspace has no ops repository connected",
         );
       }
       const repo = await opts.prisma.githubRepo.findUnique({
@@ -1003,7 +1258,7 @@ export function createImprovementPrGithubPublisher(
       });
       if (!repo) {
         throw new Error(
-          `improvement_pr: ops repo ${ws.opsRepoId} not found in github_repos`
+          `improvement_pr: ops repo ${ws.opsRepoId} not found in github_repos`,
         );
       }
 
@@ -1012,7 +1267,7 @@ export function createImprovementPrGithubPublisher(
           path: f.path,
           diff: f.diff,
           action: f.action,
-        })
+        }),
       );
       const created = await opts.adapter.createPullRequest({
         spec: {
@@ -1105,7 +1360,7 @@ interface FileChangePreview {
 }
 
 function summarizeFilesForPreview(
-  files: readonly ImprovementPrFileChange[]
+  files: readonly ImprovementPrFileChange[],
 ): FileChangePreview {
   const total = files.length;
   const slice = files.slice(0, PREVIEW_MAX_FILES);
@@ -1181,11 +1436,11 @@ export interface CreateImprovementPrAuditWriterOptions {
  *   approval_records の不在を「required」状態として表示する設計)。
  */
 export function createImprovementPrAuditWriter(
-  opts: CreateImprovementPrAuditWriterOptions
+  opts: CreateImprovementPrAuditWriterOptions,
 ): ImprovementPrAuditWriter {
   return {
     async recordImprovementPrAudit(
-      input: ImprovementPrAuditInput
+      input: ImprovementPrAuditInput,
     ): Promise<void> {
       const targetRef = input.pullRequest
         ? `pr#${input.pullRequest.prNumber}@${input.pullRequest.headSha}`
@@ -1248,7 +1503,7 @@ export function createImprovementPrAuditWriter(
 }
 
 function mapAuditDecisionToApprovalRecord(
-  decision: ImprovementPrAuditDecision
+  decision: ImprovementPrAuditDecision,
 ): "auto_approved" | "auto_blocked" | null {
   // Schema allowed values: approved | rejected | auto_blocked | auto_approved.
   // `approval_required` は AdDroid の Web UI / CLI / Slack 承認、または GitHub merge
@@ -1298,7 +1553,7 @@ export interface CreateImprovementPrPlanValidatorOptions {
  * - 一時ディレクトリは finally で必ず削除する。
  */
 export function createImprovementPrPlanValidator(
-  opts: CreateImprovementPrPlanValidatorOptions
+  opts: CreateImprovementPrPlanValidatorOptions,
 ): ImprovementPrPlanValidator {
   const mkdtemp =
     opts.mkdtemp ??
@@ -1309,13 +1564,13 @@ export function createImprovementPrPlanValidator(
       if (!opts.rootDir) {
         return skippedResult(
           "ADDROID_OPS_REPO_LOCAL_DIR not set; plan validation skipped",
-          startedAt
+          startedAt,
         );
       }
       if (!fs.existsSync(opts.rootDir)) {
         return skippedResult(
           `ADDROID_OPS_REPO_LOCAL_DIR (${opts.rootDir}) does not exist; plan validation skipped`,
-          startedAt
+          startedAt,
         );
       }
       let workDir: string | null = null;
@@ -1363,7 +1618,13 @@ export function createImprovementPrPlanValidator(
           available: false,
           ok: false,
           risk: "error",
-          counts: { creates: 0, updates: 0, deletes: 0, errors: 0, warnings: 0 },
+          counts: {
+            creates: 0,
+            updates: 0,
+            deletes: 0,
+            errors: 0,
+            warnings: 0,
+          },
           errors: [],
           warnings: [],
           summary: `plan validation failed: ${message}`,
@@ -1384,7 +1645,7 @@ export function createImprovementPrPlanValidator(
 
 function skippedResult(
   reason: string,
-  startedAt: number
+  startedAt: number,
 ): ImprovementPrPlanValidationResult {
   return {
     available: false,
@@ -1398,11 +1659,11 @@ function skippedResult(
   };
 }
 
-function toFinding(f: {
+function toFinding(f: { file: string; message: string; pointer?: string }): {
   file: string;
   message: string;
   pointer?: string;
-}): { file: string; message: string; pointer?: string } {
+} {
   const out: { file: string; message: string; pointer?: string } = {
     file: f.file,
     message: f.message,
@@ -1425,7 +1686,7 @@ function applyFileChange(workDir: string, file: ImprovementPrFileChange): void {
   const workDirAbs = path.resolve(workDir);
   if (!dest.startsWith(workDirAbs + path.sep) && dest !== workDirAbs) {
     throw new Error(
-      `improvement_pr plan validator: refused unsafe path '${file.path}'`
+      `improvement_pr plan validator: refused unsafe path '${file.path}'`,
     );
   }
   if (file.action === "delete") {

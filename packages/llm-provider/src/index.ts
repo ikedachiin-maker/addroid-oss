@@ -150,6 +150,43 @@ export {
 } from "./image-factory.js";
 
 export {
+  APPEAL_AXES,
+  COLOR_SCHEMES,
+  GENE_LABELS_JA,
+  LANGUAGES,
+  LAYOUTS,
+  SUBJECT_TYPES,
+  TONES,
+  describeGenesForPrompt,
+  parseCreativeGenes,
+  renderGenesVocabularyForPrompt,
+  type AppealAxis,
+  type CreativeColorScheme,
+  type CreativeGenes,
+  type CreativeLanguage,
+  type CreativeLayout,
+  type CreativeSubjectType,
+  type CreativeTone,
+} from "./creative-genes.js";
+
+export {
+  DEFAULT_PLACEMENT_SET,
+  PLACEMENT_PRESETS,
+  buildPlacementExpansionPlan,
+  placementPresetByKey,
+  type PlacementExpansionPlan,
+  type PlacementKey,
+} from "./placements.js";
+
+export {
+  parseCarouselCreativeSpec,
+  validateCarouselCreativeSpec,
+  type CarouselCardRole,
+  type CarouselCreativeSpec,
+  type CarouselCreativeSpecValidation,
+} from "./carousel-spec.js";
+
+export {
   CreativeStorageInvalidIdError,
   CreativeStorageQaIncompleteError,
   persistCreativeAssets,
@@ -236,6 +273,7 @@ export {
   type AuditAgentInput,
   type AuditAgentOutput,
   type CopyAgentDecision,
+  type CarouselCardPlan,
   type CopyAgentInput,
   type CopyAgentOutput,
   type CopyAgentVariant,

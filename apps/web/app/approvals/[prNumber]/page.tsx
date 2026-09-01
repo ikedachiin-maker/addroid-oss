@@ -6,6 +6,11 @@
 // approval_records / audit_logs を `web_merge` ソース付きで記録する。
 
 import Link from "next/link";
+import {
+  REJECTION_REASON_LABELS_JA,
+  REJECTION_REASONS,
+  type RejectionReason,
+} from "@addroid/queue";
 import { notFound } from "next/navigation";
 import { prisma } from "../../../lib/prisma";
 import { Panel } from "../../../components/ui/Panel";
@@ -19,6 +24,8 @@ import { CodeBlock, InlineCode } from "../../../components/ui/CodeBlock";
 import { MergePrButton } from "./MergePrButton";
 import { formatDateTime, resolveDisplayTimeZone } from "../../../lib/datetime";
 import { ensureWebWorkspace } from "../../../lib/github-runtime";
+import { CreativePreview } from "../../../components/creative-preview/CreativePreview";
+import { buildCreativePreviewProps } from "../../../lib/creative-preview-data";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +40,8 @@ interface ApprovalRow {
   comment: string | null;
   createdAt: Date;
   decisionSource: string | null;
+  rejectionReason: string | null;
+  rejectionNote: string | null;
 }
 
 interface ApplyJobRow {
@@ -192,6 +201,27 @@ function readDecisionSource(metadata: unknown): string | null {
   return null;
 }
 
+function readRejectionFeedback(metadata: unknown): {
+  rejectionReason: string | null;
+  rejectionNote: string | null;
+} {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return { rejectionReason: null, rejectionNote: null };
+  }
+  const obj = metadata as Record<string, unknown>;
+  return {
+    rejectionReason:
+      typeof obj.rejectionReason === "string" ? obj.rejectionReason : null,
+    rejectionNote:
+      typeof obj.rejectionNote === "string" ? obj.rejectionNote : null,
+  };
+}
+
+function rejectionReasonLabel(reason: string | null): string | null {
+  if (!reason || !REJECTION_REASONS.includes(reason as RejectionReason)) return reason;
+  return REJECTION_REASON_LABELS_JA[reason as RejectionReason];
+}
+
 function redactLogPayload(value: unknown): unknown {
   if (Array.isArray(value)) return value.map((item) => redactLogPayload(item));
   if (!value || typeof value !== "object") return value;
@@ -315,14 +345,19 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
     /* ai_runs テーブル未反映なら無視 */
   }
 
-  const approvals: ApprovalRow[] = pr.approvalRecords.map((row) => ({
-    id: row.id,
-    decision: row.decision,
-    approvedBy: row.approvedBy,
-    comment: row.comment,
-    createdAt: row.createdAt,
-    decisionSource: readDecisionSource(row.metadata),
-  }));
+  const approvals: ApprovalRow[] = pr.approvalRecords.map((row) => {
+    const rejectionFeedback = readRejectionFeedback(row.metadata);
+    return {
+      id: row.id,
+      decision: row.decision,
+      approvedBy: row.approvedBy,
+      comment: row.comment,
+      createdAt: row.createdAt,
+      decisionSource: readDecisionSource(row.metadata),
+      rejectionReason: rejectionFeedback.rejectionReason,
+      rejectionNote: rejectionFeedback.rejectionNote,
+    };
+  });
 
   const latestDecision = approvals[0]?.decision ?? null;
   const latestSource = approvals[0]?.decisionSource ?? null;
@@ -350,10 +385,43 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
           },
         })
       : [];
+  const creativePreviewRows = await prisma.creative
+    .findMany({
+      where: {
+        pullRequestId: pr.id,
+        account: { workspaceId: workspace.id },
+      },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        displayName: true,
+        mediaType: true,
+        spec: true,
+        storageRef: true,
+        account: {
+          select: {
+            key: true,
+            displayName: true,
+          },
+        },
+      },
+    })
+    .catch(() => []);
+  const creativePreviews = await Promise.all(
+    creativePreviewRows.map(async (creative) => ({
+      id: creative.id,
+      displayName: creative.displayName,
+      props: await buildCreativePreviewProps(creative),
+    })),
+  );
 
   const canMerge =
     pr.state === "open" &&
     approvalRequiresAction(latestDecision);
+  const rejectionReasons = REJECTION_REASONS.map((value) => ({
+    value,
+    label: REJECTION_REASON_LABELS_JA[value],
+  }));
 
   const mergeBlockedReason = (() => {
     if (pr.state === "merged") return "この PR は既にマージ済みです。";
@@ -511,6 +579,7 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
               repoFullName={`${pr.repo.owner}/${pr.repo.name}`}
               expectedHeadSha={pr.headSha}
               htmlUrl={pr.htmlUrl}
+              rejectionReasons={rejectionReasons}
             />
           )}
         </Panel>
@@ -675,6 +744,35 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
                   ]}
                 />
               </section>
+            </div>
+          )}
+        </Panel>
+
+        <Panel
+          title="クリエイティブプレビュー"
+          subtitle="PR に添付された生成クリエイティブの配信面モック"
+          status={
+            <StatusDot state={creativePreviews.length > 0 ? "info" : "idle"}>
+              {creativePreviews.length > 0 ? `${creativePreviews.length} 件` : "なし"}
+            </StatusDot>
+          }
+        >
+          {creativePreviews.length === 0 ? (
+            <EmptyState
+              title="この PR に紐付くクリエイティブはありません。"
+              description="クリエイティブ入稿PRの場合は、生成クリエイティブの Feed / Stories プレビューがここに表示されます。"
+            />
+          ) : (
+            <div className="approval-creative-previews">
+              {creativePreviews.map((creative) => (
+                <section className="approval-creative-preview" key={creative.id}>
+                  <div className="approval-creative-preview__header">
+                    <InlineCode>{creative.id}</InlineCode>
+                    <span>{creative.displayName}</span>
+                  </div>
+                  <CreativePreview {...creative.props} />
+                </section>
+              ))}
             </div>
           )}
         </Panel>
@@ -849,7 +947,21 @@ export default async function ApprovalDetailPage({ params }: PageParams) {
               },
               {
                 header: "コメント",
-                cell: (row) => row.comment ?? "—",
+                cell: (row) => {
+                  const reason = rejectionReasonLabel(row.rejectionReason);
+                  const note = row.rejectionNote;
+                  if (!reason && !note) return row.comment ?? "—";
+                  return (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                      {reason ? <span>{reason}</span> : null}
+                      {note ? (
+                        <span style={{ color: "var(--color-text-secondary)" }}>
+                          {note}
+                        </span>
+                      ) : null}
+                    </div>
+                  );
+                },
               },
             ]}
           />

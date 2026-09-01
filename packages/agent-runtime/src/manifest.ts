@@ -98,7 +98,7 @@ export const AGENT_TOOL_MANIFEST = [
     name: "set_schedule_enabled",
     description:
       "既存の pg-boss preset schedule を cron と enabled 状態込みで更新する。preset 自体の ON/OFF が明示された場合に使う。",
-    args: "{preset:'daily'|'today'|'budget'|'improvement'|'github'|'retention', cron?: string, enabled:boolean}",
+    args: "{preset:'daily'|'today'|'budget'|'rebalance'|'experiment'|'improvement'|'github'|'retention', cron?: string, enabled:boolean}",
     effects: ["local-write"],
     allowedSurfaces: ["cli-chat", "web-chat", "slack-chat"],
     guidance:
@@ -116,6 +116,17 @@ export const AGENT_TOOL_MANIFEST = [
       "Use this when the user explicitly provides budget amounts or threshold values. If the account or budget amounts are missing, ask a concise clarification question first. autoPause only creates approval-gated candidates; it must not directly mutate Meta from chat.",
   },
   {
+    name: "create_experiment",
+    description:
+      "同一広告セット内の active 広告2つを A/B テストとして登録する。評価と敗者PAUSE提案は experiment_evaluate schedule が行う。",
+    args:
+      "{accountId?:string,accountKey?:string,name:string,hypothesis?:string,metric?:'ctr'|'cvr',adsetNodeKey:string,variantAKey:string,variantBKey:string,minImpressionsPerVariant?:number,maxDurationDays?:number}",
+    effects: ["local-write"],
+    allowedSurfaces: ["cli-chat", "web-chat", "slack-chat"],
+    guidance:
+      "Use this when the user asks to start/register an A/B test between two existing ads. The two variants must be active ads in the same adset, and an ad cannot belong to multiple running experiments. This tool only registers the experiment; it does not mutate Meta.",
+  },
+  {
     name: "configure_submission_guards",
     description:
       "入稿・変更PRを事前検査する安全ガードを設定する。まずは予算増加ガードを変更し、Meta は直接変更しない。",
@@ -129,7 +140,7 @@ export const AGENT_TOOL_MANIFEST = [
   {
     name: "manage_schedule",
     description: "既存 preset schedule の一覧、履歴、または単発実行を扱う。",
-    args: "{action:'list'|'run'|'logs', preset?:'daily'|'today'|'budget'|'improvement'|'github'|'retention', limit?: number}",
+    args: "{action:'list'|'run'|'logs', preset?:'daily'|'today'|'budget'|'rebalance'|'experiment'|'improvement'|'github'|'retention', limit?: number}",
     effects: ["read", "queue"],
     allowedSurfaces: ["cli-chat", "web-chat", "slack-chat", "scheduled-agent"],
   },
@@ -266,6 +277,24 @@ export const AGENT_TOOL_MANIFEST = [
       "Use narrow read-only lookups to resolve factual missing values before asking the user, especially pageId, instagramUserId, linkUrl, existing creative, current active campaign/adset/ad, budget fields, status, objective, optimization, and billing fields. Prefer get by known ID or parent-filtered list with a small limit. Do not use this for mutations.",
   },
   {
+    name: "query_performance",
+    description: "Mirror DB の安全な定型集計で広告パフォーマンスを順位付き取得する。",
+    args: "{accountId:string, level:'account'|'campaign'|'adset'|'ad', window:{preset:'today'|'yesterday'|'last_7d'|'last_14d'|'last_30d'}|{since:'YYYY-MM-DD', until:'YYYY-MM-DD'}, metric:'spend'|'impressions'|'clicks'|'conversions'|'ctr'|'cpc'|'cpm'|'cpa'|'frequency', rank?:'top'|'bottom', limit?:number, statusFilter?:'active'|'paused'|'all'}",
+    effects: ["read"],
+    allowedSurfaces: ["cli-chat", "web-chat", "slack-chat", "scheduled-agent"],
+    guidance:
+      "Use this for natural-language performance ranking questions. It accepts only catalog fields, never SQL. Ratio metrics are computed from period sums. For efficiency metrics like cpa/cpc, use rank:'bottom' when the user asks for good/best/cheap results.",
+  },
+  {
+    name: "compare_performance",
+    description: "Mirror DB の安全な定型集計で2期間の広告パフォーマンス変化を比較する。",
+    args: "{accountId:string, level:'account'|'campaign'|'adset'|'ad', currentWindow:{preset:'today'|'yesterday'|'last_7d'|'last_14d'|'last_30d'}|{since:'YYYY-MM-DD', until:'YYYY-MM-DD'}, baselineWindow:{preset:'today'|'yesterday'|'last_7d'|'last_14d'|'last_30d'}|{since:'YYYY-MM-DD', until:'YYYY-MM-DD'}, metric:'spend'|'impressions'|'clicks'|'conversions'|'ctr'|'cpc'|'cpm'|'cpa'|'frequency', rank?:'top'|'bottom', limit?:number, statusFilter?:'active'|'paused'|'all'}",
+    effects: ["read"],
+    allowedSurfaces: ["cli-chat", "web-chat", "slack-chat", "scheduled-agent"],
+    guidance:
+      "Use this for before/after or period-over-period questions. It accepts only catalog fields, never SQL, and ranks by relative change while keeping low-sample rows flagged.",
+  },
+  {
     name: "sync_meta_mirror",
     description:
       "Meta の現在状態を Mirror DB に同期し、/campaigns や各チャット系の表示元を最新化する。Meta 側は変更しない。",
@@ -313,6 +342,7 @@ const ENGLISH_TOOL_DESCRIPTIONS: Record<string, string> = {
   create_scheduled_agent_task: "Save and enable a recurring natural-language task.",
   set_schedule_enabled: "Update an existing preset schedule and enabled state.",
   configure_budget_guard: "Save ad-account budget monitoring rules and optionally enable its schedule.",
+  create_experiment: "Register an A/B test between two active ads in the same ad set.",
   configure_submission_guards: "Configure pre-submit safety guards for ad changes.",
   manage_schedule: "List, run, or inspect existing preset schedules.",
   show_logs: "Show AdDroid operational logs.",
@@ -329,6 +359,8 @@ const ENGLISH_TOOL_DESCRIPTIONS: Record<string, string> = {
   backup_data: "Create an AdDroid database backup.",
   open_web_ui: "Show the local Web UI URL.",
   query_meta_ads: "Run a read-only query against Meta Graph API / Mirror DB.",
+  query_performance: "Run a safe cataloged aggregate performance query against the Mirror DB.",
+  compare_performance: "Compare two safe cataloged aggregate performance windows in the Mirror DB.",
   sync_meta_mirror: "Sync current Meta state into the Mirror DB without changing Meta.",
 };
 

@@ -34,6 +34,19 @@ import {
   selectAccountKpiSet,
   type BreakdownsPolicy,
 } from "./analytics.js";
+import {
+  detectAnomalies,
+  type AnomalyDetectionResult,
+  type AnomalyDetectionStore,
+  type NodeAnomalyFinding,
+} from "./anomaly-detection.js";
+import { deriveMetrics } from "./metrics.js";
+import {
+  compareProportions,
+  confidenceLabel,
+  type ConfidenceLabel,
+  type ProportionComparison,
+} from "./stats.js";
 
 // ---------------------------------------------------------------------
 // Insights provider — Meta CLI / Mock / Fixture が満たす境界
@@ -60,6 +73,17 @@ export interface DailyReportInsightsRow {
   conversions: number;
   /** 平均露出回数。Meta は "frequency" を float で返す。null 可。 */
   frequency?: number | null;
+  /** リーチ数。Meta は "reach" を整数文字列で返すことがある。 */
+  reach?: number | null;
+  /** リンククリック数。Meta field は inline_link_clicks。 */
+  linkClicks?: number | null;
+  /** 動画 ThruPlay。動画なし / 未取得なら null。 */
+  videoThruPlays?: number | null;
+  /** 3秒動画再生。動画なし / 未取得なら null。 */
+  video3SecViews?: number | null;
+  qualityRanking?: string | null;
+  engagementRateRanking?: string | null;
+  conversionRateRanking?: string | null;
 }
 
 export interface DailyReportInsightsRequest {
@@ -105,6 +129,14 @@ export interface PerformanceSnapshotUpsertInput {
   clicks: number;
   spendMicros: bigint;
   conversions: number;
+  reach?: number | null;
+  frequency?: number | null;
+  linkClicks?: number | null;
+  videoThruPlays?: number | null;
+  video3SecViews?: number | null;
+  qualityRanking?: string | null;
+  engagementRateRanking?: string | null;
+  conversionRateRanking?: string | null;
   raw?: JsonValue | null;
   source: string;
 }
@@ -131,7 +163,7 @@ export interface DailyReportAdAccountSnapshot {
   timezoneName?: string | null;
 }
 
-export interface DailyReportSnapshotStore {
+export interface DailyReportSnapshotStore extends AnomalyDetectionStore {
   /** 対象 workspace + accountKey の ad_account を返す。未登録なら null。 */
   findAdAccount(input: {
     workspaceId: string;
@@ -173,6 +205,9 @@ export interface DailyReportAnalystInput {
     cpc?: number;
     cpa?: number;
     frequency?: number;
+    reach?: number;
+    cpm?: number;
+    qualityRankingSummary?: string;
   };
   prior?: {
     spend: number;
@@ -183,7 +218,13 @@ export interface DailyReportAnalystInput {
     cpc?: number;
     cpa?: number;
     frequency?: number;
+    reach?: number;
+    cpm?: number;
+    qualityRankingSummary?: string;
   };
+  statisticalContext?: DailyReportStatisticalContext;
+  anomalyFindings?: DailyReportAnomalyFinding[];
+  quietDay?: boolean;
   snapshotIds: string[];
 }
 
@@ -274,6 +315,31 @@ export interface DailyReportImprovementCandidate {
   expectedImpact: string;
 }
 
+export interface DailyReportStatisticalComparison {
+  metric: "ctr" | "cvr";
+  verdict: ProportionComparison["verdict"];
+  pApprox: number | null;
+  relativeChange: number | null;
+  minTrialsMet: boolean;
+}
+
+export interface DailyReportStatisticalContext {
+  comparisons: DailyReportStatisticalComparison[];
+  confidence: ConfidenceLabel;
+}
+
+export interface DailyReportAnomalyFinding {
+  hierarchy: string;
+  nodeKey: string;
+  displayName: string;
+  metric: string;
+  kind: string;
+  currentValue: number;
+  baselineValue: number;
+  relativeChange: number | null;
+  severity: string;
+}
+
 export interface DailyReportSummary {
   status: DailyReportRunStatus;
   workspaceId: string;
@@ -292,6 +358,12 @@ export interface DailyReportSummary {
   prior: DailyReportKpiSet;
   /** UI 表示用 (`+12.3%` / `-4.5%`)。 */
   deltas: Record<string, string>;
+  /** CTR/CVR の統計的比較とサンプル信頼ラベル。 */
+  statisticalContext: DailyReportStatisticalContext;
+  /** LLM なしで検知した注目変化。UI と analyst 入力の根拠。 */
+  anomalies: AnomalyDetectionResult;
+  /** 異常検知に失敗し、従来 analyst 入力へフォールバックした場合の警告。 */
+  anomalyDetectionError?: string;
   /** 永続化された snapshot id 一覧 (4 階層)。 */
   snapshotIds: string[];
   /** AI コメント (analyst agent succeeded のみ非 null)。 */
@@ -317,6 +389,12 @@ const ZERO_KPIS: DailyReportKpiSet = Object.freeze({
   cv: 0,
   cpm: 0,
   frequency: null,
+});
+
+const EMPTY_ANOMALIES: AnomalyDetectionResult = Object.freeze({
+  findings: [],
+  evaluatedNodeCount: 0,
+  quietDay: true,
 });
 
 /**
@@ -358,6 +436,8 @@ export async function runDailyReportOnce(
       current: ZERO_KPIS,
       prior: ZERO_KPIS,
       deltas: {},
+      statisticalContext: buildStatisticalContext(ZERO_KPIS, ZERO_KPIS),
+      anomalies: EMPTY_ANOMALIES,
       snapshotIds: [],
       aiCommentary: null,
       topImprovements: [],
@@ -387,6 +467,14 @@ export async function runDailyReportOnce(
       clicks: row.clicks,
       spendMicros: row.spendMicros,
       conversions: row.conversions,
+      reach: row.reach ?? null,
+      frequency: row.frequency ?? null,
+      linkClicks: row.linkClicks ?? null,
+      videoThruPlays: row.videoThruPlays ?? null,
+      video3SecViews: row.video3SecViews ?? null,
+      qualityRanking: row.qualityRanking ?? null,
+      engagementRateRanking: row.engagementRateRanking ?? null,
+      conversionRateRanking: row.conversionRateRanking ?? null,
       raw: insightsRowToRaw(row),
       source: insights.source,
     });
@@ -403,6 +491,14 @@ export async function runDailyReportOnce(
       clicks: row.clicks,
       spendMicros: row.spendMicros,
       conversions: row.conversions,
+      reach: row.reach ?? null,
+      frequency: row.frequency ?? null,
+      linkClicks: row.linkClicks ?? null,
+      videoThruPlays: row.videoThruPlays ?? null,
+      video3SecViews: row.video3SecViews ?? null,
+      qualityRanking: row.qualityRanking ?? null,
+      engagementRateRanking: row.engagementRateRanking ?? null,
+      conversionRateRanking: row.conversionRateRanking ?? null,
       raw: insightsRowToRaw(row),
       source: insights.source,
     });
@@ -423,6 +519,7 @@ export async function runDailyReportOnce(
   const current = currentSelection.kpis;
   const prior = priorSelection.kpis;
   const deltas = computeKpiDeltas(current, prior);
+  const statisticalContext = buildStatisticalContext(current, prior);
 
   if (insights.current.length === 0) {
     return {
@@ -438,6 +535,8 @@ export async function runDailyReportOnce(
       current,
       prior,
       deltas,
+      statisticalContext,
+      anomalies: EMPTY_ANOMALIES,
       snapshotIds,
       aiCommentary: null,
       topImprovements: [],
@@ -447,6 +546,18 @@ export async function runDailyReportOnce(
     };
   }
 
+  let anomalies: AnomalyDetectionResult = EMPTY_ANOMALIES;
+  let anomalyDetectionError: string | undefined;
+  try {
+    anomalies = await detectAnomalies({
+      store: opts.store,
+      accountId: account.id,
+      targetDate: metricDate,
+    });
+  } catch (err) {
+    anomalyDetectionError = err instanceof Error ? err.message : String(err);
+  }
+
   const analystInput: DailyReportAnalystInput = {
     accountId: account.metaAccountId ?? account.key,
     periodStart: metricDate,
@@ -454,10 +565,15 @@ export async function runDailyReportOnce(
     priorPeriodStart: priorMetricDate,
     priorPeriodEnd: priorMetricDate,
     current: kpiSetToAnalystMetrics(current),
+    statisticalContext,
     snapshotIds,
   };
   if (priorSelection.source !== "none") {
     analystInput.prior = kpiSetToAnalystMetrics(prior);
+  }
+  if (!anomalyDetectionError) {
+    analystInput.anomalyFindings = anomalies.findings.map(anomalyFindingForAnalyst);
+    analystInput.quietDay = anomalies.quietDay;
   }
 
   const analystResult = await opts.analyst.run(analystInput);
@@ -477,6 +593,9 @@ export async function runDailyReportOnce(
       current,
       prior,
       deltas,
+      statisticalContext,
+      anomalies,
+      ...(anomalyDetectionError ? { anomalyDetectionError } : {}),
       snapshotIds,
       aiCommentary: null,
       topImprovements: [],
@@ -509,11 +628,53 @@ export async function runDailyReportOnce(
     current,
     prior,
     deltas: mergedDeltas,
+    statisticalContext,
+    anomalies,
+    ...(anomalyDetectionError ? { anomalyDetectionError } : {}),
     snapshotIds,
     aiCommentary: analystResult.output.commentary,
     topImprovements: top,
     aiRunId: aiRunRow.id,
     mode: opts.mode,
+  };
+}
+
+function anomalyFindingForAnalyst(finding: NodeAnomalyFinding): DailyReportAnomalyFinding {
+  return {
+    hierarchy: finding.hierarchy,
+    nodeKey: finding.nodeKey,
+    displayName: finding.displayName,
+    metric: finding.metric,
+    kind: finding.kind,
+    currentValue: finding.currentValue,
+    baselineValue: finding.baselineValue,
+    relativeChange: finding.relativeChange,
+    severity: finding.severity,
+  };
+}
+
+export function buildStatisticalContext(
+  current: DailyReportKpiSet,
+  prior: DailyReportKpiSet
+): DailyReportStatisticalContext {
+  return {
+    comparisons: [
+      {
+        metric: "ctr",
+        ...compareProportions(
+          { successes: prior.clicks, trials: prior.impressions },
+          { successes: current.clicks, trials: current.impressions }
+        ),
+      },
+      {
+        metric: "cvr",
+        ...compareProportions(
+          { successes: prior.conversions, trials: prior.clicks },
+          { successes: current.conversions, trials: current.clicks }
+        ),
+      },
+    ],
+    confidence: confidenceLabel(current.conversions, current.impressions),
   };
 }
 
@@ -612,8 +773,16 @@ function kpiSetToAnalystMetrics(k: DailyReportKpiSet): {
   ctr: number;
   cpc: number;
   cpa: number;
+  cpm: number;
   frequency?: number;
 } {
+  const derived = deriveMetrics({
+    impressions: k.impressions,
+    clicks: k.clicks,
+    spendMicros: BigInt(Math.round(k.spend * 1_000_000)),
+    conversions: k.conversions,
+    frequency: k.frequency,
+  });
   const out: {
     spend: number;
     impressions: number;
@@ -622,15 +791,17 @@ function kpiSetToAnalystMetrics(k: DailyReportKpiSet): {
     ctr: number;
     cpc: number;
     cpa: number;
+    cpm: number;
     frequency?: number;
   } = {
     spend: k.spend,
     impressions: k.impressions,
     clicks: k.clicks,
     conversions: k.conversions,
-    ctr: k.ctr,
-    cpc: k.cpc,
-    cpa: k.cpa,
+    ctr: derived.ctr === null ? k.ctr : round6(derived.ctr * 100),
+    cpc: derived.cpcMajor === null ? k.cpc : round6(derived.cpcMajor),
+    cpa: derived.cpaMajor === null ? k.cpa : round6(derived.cpaMajor),
+    cpm: derived.cpmMajor === null ? k.cpm : round6(derived.cpmMajor),
   };
   if (typeof k.frequency === "number") out.frequency = k.frequency;
   return out;
@@ -646,6 +817,13 @@ function insightsRowToRaw(row: DailyReportInsightsRow): JsonValue {
     impressions: row.impressions,
     clicks: row.clicks,
     conversions: row.conversions,
+    reach: row.reach ?? null,
+    linkClicks: row.linkClicks ?? null,
+    videoThruPlays: row.videoThruPlays ?? null,
+    video3SecViews: row.video3SecViews ?? null,
+    qualityRanking: row.qualityRanking ?? null,
+    engagementRateRanking: row.engagementRateRanking ?? null,
+    conversionRateRanking: row.conversionRateRanking ?? null,
     frequency:
       typeof row.frequency === "number" && Number.isFinite(row.frequency)
         ? row.frequency

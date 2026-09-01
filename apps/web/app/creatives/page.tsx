@@ -23,6 +23,16 @@
 
 import Link from "next/link";
 import type { Prisma } from "@addroid/db";
+import {
+  APPEAL_AXES,
+  GENE_LABELS_JA,
+  parseCreativeGenes,
+  type AppealAxis,
+} from "@addroid/llm-provider";
+import {
+  buildCreativePerformanceDigest,
+  type CreativePerformanceEntry,
+} from "@addroid/queue";
 import { prisma } from "../../lib/prisma";
 import { Panel } from "../../components/ui/Panel";
 import { PageHeader } from "../../components/ui/PageHeader";
@@ -54,6 +64,7 @@ interface SearchParamsInput {
   accountId?: string | string[];
   status?: string | string[];
   provider?: string | string[];
+  appealAxis?: string | string[];
 }
 
 interface CreativeRow {
@@ -66,6 +77,7 @@ interface CreativeRow {
   model: string | null;
   storageRef: string | null;
   storagePath: string | null;
+  genes: unknown;
   pullRequestId: string | null;
   aiRunId: string | null;
   creativeQaAiRunId: string | null;
@@ -82,6 +94,12 @@ interface ResolvedThumb {
   storageReachable: boolean;
 }
 
+interface CreativeCardPerformance {
+  impressions: number;
+  ctr: number | null;
+  verdict: CreativePerformanceEntry["verdict"];
+}
+
 const TAKE = 60;
 
 export default async function CreativesPage({
@@ -90,9 +108,22 @@ export default async function CreativesPage({
   searchParams?: Promise<SearchParamsInput>;
 }) {
   const resolvedSearchParams = await searchParams;
-  const accountIdParam = firstSearchParam(resolvedSearchParams?.accountId) ?? null;
-  const statusParam = (firstSearchParam(resolvedSearchParams?.status) ?? "all").trim();
-  const providerParam = (firstSearchParam(resolvedSearchParams?.provider) ?? "all").trim();
+  const accountIdParam =
+    firstSearchParam(resolvedSearchParams?.accountId) ?? null;
+  const statusParam = (
+    firstSearchParam(resolvedSearchParams?.status) ?? "all"
+  ).trim();
+  const providerParam = (
+    firstSearchParam(resolvedSearchParams?.provider) ?? "all"
+  ).trim();
+  const appealAxisParam = (
+    firstSearchParam(resolvedSearchParams?.appealAxis) ?? "all"
+  ).trim();
+  const selectedAppealAxis: AppealAxis | "all" = APPEAL_AXES.includes(
+    appealAxisParam as AppealAxis,
+  )
+    ? (appealAxisParam as AppealAxis)
+    : "all";
 
   let dbReady = true;
   let accounts: AccountOption[] = [];
@@ -131,6 +162,12 @@ export default async function CreativesPage({
       where.storageRef = { not: null };
       where.storagePath = { not: null };
     }
+    if (selectedAppealAxis !== "all") {
+      where.genes = {
+        path: ["appealAxes"],
+        array_contains: [selectedAppealAxis],
+      };
+    }
 
     creatives = await prisma.creative.findMany({
       where,
@@ -146,6 +183,7 @@ export default async function CreativesPage({
         model: true,
         storageRef: true,
         storagePath: true,
+        genes: true,
         pullRequestId: true,
         aiRunId: true,
         creativeQaAiRunId: true,
@@ -195,17 +233,32 @@ export default async function CreativesPage({
   const thumbs = await Promise.all(
     creatives.map(async (row): Promise<ResolvedThumb> => {
       if (!row.storageRef) {
-        return { assetId: null, width: null, height: null, storageReachable: false };
+        return {
+          assetId: null,
+          width: null,
+          height: null,
+          storageReachable: false,
+        };
       }
       const metadata = await readCreativeMetadataByRef(row.storageRef);
       if (!metadata || metadata.assets.length === 0) {
-        return { assetId: null, width: null, height: null, storageReachable: false };
+        return {
+          assetId: null,
+          width: null,
+          height: null,
+          storageReachable: false,
+        };
       }
       const matched = findAssetForCreativeRow(metadata, {
         storagePath: row.storagePath,
       });
       if (!matched) {
-        return { assetId: null, width: null, height: null, storageReachable: false };
+        return {
+          assetId: null,
+          width: null,
+          height: null,
+          storageReachable: false,
+        };
       }
       return {
         assetId: matched.assetId,
@@ -213,11 +266,12 @@ export default async function CreativesPage({
         height: matched.height,
         storageReachable: true,
       };
-    })
+    }),
   );
 
   const showingCount = creatives.length;
   const moreCount = Math.max(totalForAccount - showingCount, 0);
+  const performanceByCreativeId = await loadPerformanceByCreativeId(creatives);
 
   return (
     <>
@@ -239,7 +293,10 @@ export default async function CreativesPage({
             <button className="btn" type="submit">
               入稿チャット
             </button>
-            <RunCronButton presetName="auto_creative_generation" label="生成を開始" />
+            <RunCronButton
+              presetName="auto_creative_generation"
+              label="生成を開始"
+            />
           </form>
         }
       />
@@ -251,6 +308,7 @@ export default async function CreativesPage({
           selectedAccountId={accountIdParam}
           selectedStatus={statusParam}
           selectedProvider={providerParam}
+          selectedAppealAxis={selectedAppealAxis}
         />
 
         <Panel
@@ -295,12 +353,15 @@ export default async function CreativesPage({
                 <CreativeCard
                   key={row.id}
                   row={row}
-                  thumb={thumbs[i] ?? {
-                    assetId: null,
-                    width: null,
-                    height: null,
-                    storageReachable: false,
-                  }}
+                  thumb={
+                    thumbs[i] ?? {
+                      assetId: null,
+                      width: null,
+                      height: null,
+                      storageReachable: false,
+                    }
+                  }
+                  performance={performanceByCreativeId.get(row.id) ?? null}
                 />
               ))}
             </div>
@@ -314,9 +375,11 @@ export default async function CreativesPage({
 function CreativeCard({
   row,
   thumb,
+  performance,
 }: {
   row: CreativeRow;
   thumb: ResolvedThumb;
+  performance: CreativeCardPerformance | null;
 }) {
   const status = row.status as CreativeStatus | string;
   const statusState = creativeStatusToState(status);
@@ -324,17 +387,24 @@ function CreativeCard({
   const showImage = hasStorageRef && thumb.assetId !== null;
   const showStorageMissing = hasStorageRef && !thumb.storageReachable;
   const spec = parseCreativeSpec(row.spec);
+  const genes = parseCreativeGenes(row.genes) ?? spec.genes;
   const adText = spec.adText;
   const accountName = row.account?.displayName || row.account?.key || "AdDroid";
   const headline = adText?.headline || row.displayName;
-  const primaryText = adText?.primaryText || "広告テキスト案は詳細画面で確認できます。";
+  const primaryText =
+    adText?.primaryText || "広告テキスト案は詳細画面で確認できます。";
   const description = adText?.description || "詳しくはこちら";
   const cta = adText?.callToAction || "LEARN_MORE";
   const disabled = row.status === "qa_failed";
+  const carouselCardCount =
+    row.mediaType === "carousel" ? (spec.carousel?.cards.length ?? null) : null;
 
   return (
     <article className="creative-card-wrap">
-      <label className="creative-card__select" title={disabled ? "このCRは入稿候補にできません" : "入稿候補に選択"}>
+      <label
+        className="creative-card__select"
+        title={disabled ? "このCRは入稿候補にできません" : "入稿候補に選択"}
+      >
         <input
           form="creative-submit-selected-form"
           type="checkbox"
@@ -350,7 +420,10 @@ function CreativeCard({
         data-testid="creative-card"
         data-status={row.status}
       >
-        <div className="creative-card__ad-preview" aria-label="Meta広告プレビュー">
+        <div
+          className="creative-card__ad-preview"
+          aria-label="Meta広告プレビュー"
+        >
           <div className="creative-card__ad-header">
             <div className="creative-card__avatar" aria-hidden="true">
               {accountName.slice(0, 1).toUpperCase()}
@@ -405,6 +478,20 @@ function CreativeCard({
         <div className="creative-card__meta">
           <div className="creative-card__row">
             <StatusBadge state={statusState}>{row.status}</StatusBadge>
+            {carouselCardCount ? (
+              <StatusBadge state="info">{carouselCardCount} cards</StatusBadge>
+            ) : null}
+          </div>
+          <div className="creative-card__genes" aria-label="訴求軸">
+            {genes ? (
+              genes.appealAxes.map((axis) => (
+                <span className="creative-gene-chip" key={axis}>
+                  {GENE_LABELS_JA[axis] ?? axis}
+                </span>
+              ))
+            ) : (
+              <span className="creative-card__optional">タグなし</span>
+            )}
           </div>
           <div className="creative-card__title" title={row.displayName}>
             {row.displayName}
@@ -415,7 +502,9 @@ function CreativeCard({
                 {row.provider}/{row.model}
               </InlineCode>
             ) : (
-              <span className="creative-card__optional">画像 Provider 未設定</span>
+              <span className="creative-card__optional">
+                画像 Provider 未設定
+              </span>
             )}
           </div>
           {thumb.width && thumb.height ? (
@@ -425,6 +514,26 @@ function CreativeCard({
               </InlineCode>
             </div>
           ) : null}
+          <div className="creative-card__performance">
+            {performance ? (
+              <>
+                <span className="mono">
+                  {performance.impressions.toLocaleString("ja-JP")} imp
+                </span>
+                <span className="mono">
+                  CTR{" "}
+                  {performance.ctr === null
+                    ? "—"
+                    : `${(performance.ctr * 100).toFixed(1)}%`}
+                </span>
+                <StatusBadge state={performanceState(performance.verdict)}>
+                  {performanceLabel(performance.verdict)}
+                </StatusBadge>
+              </>
+            ) : (
+              <span className="creative-card__optional">実績なし</span>
+            )}
+          </div>
           <div className="creative-card__footer">
             <span className="creative-card__account mono">
               {row.account ? row.account.key : "—"}
@@ -440,6 +549,182 @@ function CreativeCard({
       </Link>
     </article>
   );
+}
+
+async function loadPerformanceByCreativeId(
+  creatives: CreativeRow[],
+): Promise<Map<string, CreativeCardPerformance>> {
+  const accountIds = [
+    ...new Set(
+      creatives
+        .map((creative) => creative.account?.id)
+        .filter((id): id is string => typeof id === "string"),
+    ),
+  ];
+  if (accountIds.length === 0) return new Map();
+  const now = new Date();
+  const until = dateOnly(addUtcDays(now, -1));
+  const since = dateOnly(addUtcDays(now, -28));
+  const entries = await Promise.all(
+    accountIds.map(async (accountId) => {
+      const digest = await buildCreativePerformanceDigest({
+        store: {
+          listAdCreativePerformance: (input) =>
+            listAdCreativePerformanceForWeb(
+              input.accountId,
+              input.since,
+              input.until,
+            ),
+        },
+        accountId,
+        since,
+        until,
+      });
+      return digest.entries;
+    }),
+  );
+  const out = new Map<string, CreativeCardPerformance>();
+  for (const entry of entries.flat()) {
+    out.set(entry.creativeId, {
+      impressions: entry.metrics.impressions,
+      ctr: entry.metrics.ctr,
+      verdict: entry.verdict,
+    });
+  }
+  return out;
+}
+
+async function listAdCreativePerformanceForWeb(
+  accountId: string,
+  since: string,
+  until: string,
+) {
+  const snapshots = await prisma.performanceSnapshot.findMany({
+    where: {
+      accountId,
+      nodeType: "ad",
+      metricDate: {
+        gte: new Date(`${since}T00:00:00.000Z`),
+        lte: new Date(`${until}T00:00:00.000Z`),
+      },
+    },
+    select: {
+      id: true,
+      accountId: true,
+      nodeType: true,
+      nodeKey: true,
+      metricDate: true,
+      impressions: true,
+      clicks: true,
+      conversions: true,
+      spendMicros: true,
+      hierarchy: {
+        select: {
+          id: true,
+          accountId: true,
+          nodeType: true,
+          nodeKey: true,
+          displayName: true,
+        },
+      },
+    },
+  });
+  const hierarchyIds = [
+    ...new Set(
+      snapshots
+        .map((snapshot) => snapshot.hierarchy?.id)
+        .filter((id): id is string => typeof id === "string"),
+    ),
+  ];
+  if (hierarchyIds.length === 0) return [];
+  const creativeRows = await prisma.creative.findMany({
+    where: {
+      accountId,
+      hierarchyId: { in: hierarchyIds },
+      status: { in: ["merged", "active_on_meta"] },
+    },
+    orderBy: [{ updatedAt: "desc" }],
+    select: {
+      id: true,
+      key: true,
+      displayName: true,
+      genes: true,
+      spec: true,
+      prompt: true,
+      status: true,
+      updatedAt: true,
+      hierarchyId: true,
+    },
+  });
+  const creativesByHierarchy = new Map<string, typeof creativeRows>();
+  for (const creative of creativeRows) {
+    if (!creative.hierarchyId) continue;
+    const list = creativesByHierarchy.get(creative.hierarchyId);
+    if (list) {
+      list.push(creative);
+    } else {
+      creativesByHierarchy.set(creative.hierarchyId, [creative]);
+    }
+  }
+  return snapshots.flatMap((snapshot) => {
+    const hierarchy = snapshot.hierarchy;
+    if (!hierarchy) return [];
+    const matched = creativesByHierarchy.get(hierarchy.id) ?? [];
+    return matched.map((creative) => ({
+      snapshotRow: {
+        id: snapshot.id,
+        accountId: snapshot.accountId,
+        nodeType: snapshot.nodeType,
+        nodeKey: snapshot.nodeKey,
+        metricDate: snapshot.metricDate,
+        impressions: snapshot.impressions,
+        clicks: snapshot.clicks,
+        conversions: snapshot.conversions,
+        spendMicros: snapshot.spendMicros,
+      },
+      hierarchyRow: hierarchy,
+      creativeRow: creative,
+      ambiguous: matched.length > 1,
+    }));
+  });
+}
+
+function performanceState(verdict: CreativePerformanceEntry["verdict"]) {
+  switch (verdict) {
+    case "winner":
+      return "ok";
+    case "loser":
+      return "error";
+    case "neutral":
+      return "info";
+    case "insufficient_data":
+      return "idle";
+  }
+}
+
+function performanceLabel(
+  verdict: CreativePerformanceEntry["verdict"],
+): string {
+  switch (verdict) {
+    case "winner":
+      return "勝ち";
+    case "loser":
+      return "負け";
+    case "neutral":
+      return "中立";
+    case "insufficient_data":
+      return "不足";
+  }
+}
+
+function addUtcDays(date: Date, days: number): Date {
+  const copy = new Date(date.getTime());
+  copy.setUTCDate(copy.getUTCDate() + days);
+  return copy;
+}
+
+function dateOnly(date: Date): string {
+  return date.toISOString().slice(0, 10);
 }
 
 function ctaLabel(value: string): string {

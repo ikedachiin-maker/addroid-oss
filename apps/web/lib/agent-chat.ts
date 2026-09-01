@@ -82,6 +82,10 @@ import {
   type BudgetGuardPolicyConfigInput,
 } from "../../worker/src/lib/budget-guard-policy-config";
 import {
+  createExperimentRegistration,
+  type CreateExperimentResult,
+} from "../../worker/src/lib/experiment-registration";
+import {
   saveSubmissionGuardPolicyConfig,
   type SubmissionGuardPolicyConfigInput,
 } from "../../worker/src/lib/submission-guard-policy-config";
@@ -104,6 +108,10 @@ import {
 } from "../../worker/src/lib/approval-decision-runtime";
 import { runMetaMirrorSync } from "../../worker/src/lib/meta-mirror-runtime";
 import { runMetaAdsReadOnlyQuery } from "../../worker/src/lib/meta-ads-readonly-runtime";
+import {
+  runPerformanceCompareCatalogTool,
+  runPerformanceQueryCatalogTool,
+} from "../../worker/src/lib/query-catalog-runtime";
 
 export interface WebAgentExecution {
   display: string;
@@ -653,6 +661,8 @@ export async function executeWebAgentTool(
         return await setScheduleEnabledTool(tool.toolArgs, tool.display);
       case "configure_budget_guard":
         return await configureBudgetGuardTool(tool.toolArgs, tool.display, webUrl);
+      case "create_experiment":
+        return await createExperimentTool(workspaceId, tool.toolArgs, tool.display, "agent:web-chat");
       case "configure_submission_guards":
         return await configureSubmissionGuardsTool(tool.toolArgs, tool.display, webUrl);
       case "manage_schedule":
@@ -661,6 +671,10 @@ export async function executeWebAgentTool(
         return await runSubmissionCheck(workspaceId, tool.toolArgs, tool.display);
       case "show_logs":
         return await showRecentLogs(tool.toolArgs, tool.display);
+      case "query_performance":
+        return await runPerformanceQueryTool(tool.toolArgs, tool.display);
+      case "compare_performance":
+        return await runPerformanceCompareTool(tool.toolArgs, tool.display);
       case "query_meta_ads":
         return await runMetaAdsReadOnlyTool(workspaceId, tool.toolArgs, tool.display);
       case "sync_meta_mirror":
@@ -1906,6 +1920,26 @@ async function configureBudgetGuardTool(
   };
 }
 
+async function createExperimentTool(
+  workspaceId: string,
+  args: Record<string, unknown>,
+  display: string,
+  actor: string
+): Promise<WebAgentExecution> {
+  const experiment: CreateExperimentResult = await createExperimentRegistration({
+    prisma,
+    workspaceId,
+    input: args,
+    actor,
+  });
+  return {
+    display,
+    status: "ok",
+    message: `A/Bテスト「${experiment.name}」を登録しました。experiment_evaluate が有効なら次回実行時に評価します。`,
+    data: { experiment },
+  };
+}
+
 async function configureSubmissionGuardsTool(
   args: Record<string, unknown>,
   display: string,
@@ -2068,6 +2102,50 @@ async function runMetaAdsReadOnlyTool(
       display,
       status: "error",
       message: `Meta Ads の読み取りを実行できませんでした: ${(err as Error).message}`,
+    };
+  }
+}
+
+async function runPerformanceQueryTool(
+  args: Record<string, unknown>,
+  display: string
+): Promise<WebAgentExecution> {
+  try {
+    const result = await runPerformanceQueryCatalogTool({ prisma, args });
+    return {
+      display,
+      status: "ok",
+      message: result.message,
+      data: result.result,
+      visible: false,
+    };
+  } catch (err) {
+    return {
+      display,
+      status: "error",
+      message: `パフォーマンス集計を実行できませんでした: ${(err as Error).message}`,
+    };
+  }
+}
+
+async function runPerformanceCompareTool(
+  args: Record<string, unknown>,
+  display: string
+): Promise<WebAgentExecution> {
+  try {
+    const result = await runPerformanceCompareCatalogTool({ prisma, args });
+    return {
+      display,
+      status: "ok",
+      message: result.message,
+      data: result.result,
+      visible: false,
+    };
+  } catch (err) {
+    return {
+      display,
+      status: "error",
+      message: `パフォーマンス比較を実行できませんでした: ${(err as Error).message}`,
     };
   }
 }
@@ -2807,6 +2885,15 @@ function reportPreset(value: string): CronPresetName {
         ? "today_report"
         : v === "budget" || v === "budget_guard"
           ? "budget_guard"
+        : v === "rebalance" || v === "budget_rebalance" || v === "予算再配分"
+          ? "budget_rebalance"
+        : v === "experiment" ||
+            v === "experiments" ||
+            v === "ab" ||
+            v === "ab_test" ||
+            v === "experiment_evaluate" ||
+            v === "実験"
+          ? "experiment_evaluate"
         : v === "improvement" || v === "improvements" || v === "improvement_pr"
           ? "improvement_pr"
           : v === "creative" ||

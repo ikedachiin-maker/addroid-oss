@@ -68,6 +68,10 @@ import {
   type BudgetGuardPolicyConfigInput,
 } from "./budget-guard-policy-config.js";
 import {
+  createExperimentRegistration,
+  type CreateExperimentResult,
+} from "./experiment-registration.js";
+import {
   saveSubmissionGuardPolicyConfig,
   type SubmissionGuardPolicyConfigInput,
 } from "./submission-guard-policy-config.js";
@@ -78,6 +82,10 @@ import {
 } from "./approval-decision-runtime.js";
 import { buildPrismaMetaAdapterSelection } from "./meta-runtime.js";
 import { runMetaMirrorSync } from "./meta-mirror-runtime.js";
+import {
+  runPerformanceCompareCatalogTool,
+  runPerformanceQueryCatalogTool,
+} from "./query-catalog-runtime.js";
 
 export interface RunDueAgentTasksOptions {
   prisma: PrismaClient;
@@ -471,6 +479,8 @@ export async function executeWorkerAgentTool(opts: {
         return await setScheduleEnabled({ ...opts, tool: readyTool });
       case "configure_budget_guard":
         return await configureBudgetGuard({ ...opts, tool: readyTool });
+      case "create_experiment":
+        return await createExperiment({ ...opts, tool: readyTool });
       case "configure_submission_guards":
         return await configureSubmissionGuards({ ...opts, tool: readyTool });
       case "manage_schedule":
@@ -479,6 +489,46 @@ export async function executeWorkerAgentTool(opts: {
         return await runSubmissionCheck({ ...opts, tool: readyTool });
       case "show_logs":
         return await showRecentLogs({ ...opts, tool: readyTool });
+      case "query_performance": {
+        try {
+          const result = await runPerformanceQueryCatalogTool({
+            prisma: opts.prisma,
+            args: readyTool.toolArgs,
+          });
+          return {
+            display: readyTool.display,
+            status: "ok",
+            message: result.message,
+            data: result.result,
+          };
+        } catch (err) {
+          return {
+            display: readyTool.display,
+            status: "error",
+            message: `パフォーマンス集計を実行できませんでした: ${(err as Error).message}`,
+          };
+        }
+      }
+      case "compare_performance": {
+        try {
+          const result = await runPerformanceCompareCatalogTool({
+            prisma: opts.prisma,
+            args: readyTool.toolArgs,
+          });
+          return {
+            display: readyTool.display,
+            status: "ok",
+            message: result.message,
+            data: result.result,
+          };
+        } catch (err) {
+          return {
+            display: readyTool.display,
+            status: "error",
+            message: `パフォーマンス比較を実行できませんでした: ${(err as Error).message}`,
+          };
+        }
+      }
       case "query_meta_ads": {
         const result = await runMetaAdsReadOnlyQuery({
           prisma: opts.prisma,
@@ -945,6 +995,26 @@ async function configureBudgetGuard(opts: {
     message:
       `予算チェックを保存しました。${scheduleResult.message} 確認: ${opts.webUrl}/budget`,
     data: { saved, schedule: scheduleResult.data },
+  };
+}
+
+async function createExperiment(opts: {
+  tool: Extract<AgentToolResult, { status: "ready" }>;
+  prisma: PrismaClient;
+  workspaceId: string;
+  actor?: string;
+}): Promise<{ display: string; status: string; message: string; data?: unknown }> {
+  const experiment: CreateExperimentResult = await createExperimentRegistration({
+    prisma: opts.prisma,
+    workspaceId: opts.workspaceId,
+    input: opts.tool.toolArgs,
+    actor: opts.actor ?? "agent:slack-chat",
+  });
+  return {
+    display: opts.tool.display,
+    status: "ok",
+    message: `A/Bテスト「${experiment.name}」を登録しました。experiment_evaluate が有効なら次回実行時に評価します。`,
+    data: { experiment },
   };
 }
 
@@ -1449,6 +1519,15 @@ function reportPreset(value: string): CronPresetName {
         ? "today_report"
         : v === "budget" || v === "budget_guard"
           ? "budget_guard"
+        : v === "rebalance" || v === "budget_rebalance" || v === "予算再配分"
+          ? "budget_rebalance"
+        : v === "experiment" ||
+            v === "experiments" ||
+            v === "ab" ||
+            v === "ab_test" ||
+            v === "experiment_evaluate" ||
+            v === "実験"
+          ? "experiment_evaluate"
         : v === "improvement" || v === "improvements" || v === "improvement_pr"
           ? "improvement_pr"
           : v === "creative" ||

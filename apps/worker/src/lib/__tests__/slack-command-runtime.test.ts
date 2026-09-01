@@ -194,6 +194,15 @@ function buildDailyReportSummary(
       frequency: null,
     },
     deltas: {},
+    statisticalContext: {
+      comparisons: [],
+      confidence: "insufficient",
+    },
+    anomalies: {
+      findings: [],
+      evaluatedNodeCount: 0,
+      quietDay: true,
+    },
     snapshotIds: [],
     aiCommentary: status === "succeeded" ? `commentary for ${accountKey}` : null,
     topImprovements: [],
@@ -272,6 +281,9 @@ function fakeDailyReportStore(): DailyReportSnapshotStore {
     },
     async createAiRun() {
       throw new Error("not used in test");
+    },
+    async listSnapshotSeries() {
+      return [];
     },
   };
 }
